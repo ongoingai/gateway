@@ -1,0 +1,142 @@
+---
+title: Analytics, cost, and token accounting
+description: Query usage and estimated cost from trace data with tenant-scoped analytics endpoints.
+related:
+  title: Next steps
+  description: Continue with limits, tracing details, and API reference.
+  links:
+    - gateway/capabilities/rate-limiting-and-quotas
+    - gateway/capabilities/tracing-and-audit-logs
+    - gateway/reference/rest-api-reference
+---
+
+Use this page to understand how analytics endpoints compute usage and estimated
+cost from stored traces.
+You can use these endpoints for spend visibility, trend analysis, and capacity
+planning.
+
+## At a glance
+
+- Returns usage totals from trace records.
+- Returns estimated cost totals from trace records.
+- Returns model and API-key-hash activity summaries.
+- Returns combined summary metrics across usage, cost, model activity, and key
+  activity.
+
+## Practical fit
+
+- You need usage visibility by provider and model.
+- You need cost trend data for budget controls.
+- You need tenant-scoped analytics in shared gateway environments.
+
+## Data flow
+
+1. Proxy requests are captured as traces.
+2. Analytics handlers query the trace store for aggregate data.
+3. Tenant scope is applied from authenticated identity when auth is enabled.
+4. Usage and cost series support optional grouping and time buckets.
+5. Summary endpoint combines usage, cost, model, and key aggregates in one
+   response.
+
+## First query pattern
+
+No feature flag is required. Analytics APIs are available when trace storage is
+configured and trace data exists.
+
+If `auth.enabled=true`, analytics endpoints require gateway auth with
+`analytics:read` permission.
+
+## Query patterns
+
+- Filter usage by `provider`, `model`, `from`, and `to`.
+- For usage and cost series, use `group_by` as `provider` or `model`.
+- For usage and cost series, use `bucket` as `hour`, `day`, or `week`.
+
+## Example calls
+
+### Usage summary for one provider
+
+```bash filename="Terminal"
+curl "http://localhost:8080/api/analytics/usage?provider=openai"
+```
+
+### Hourly cost series grouped by model
+
+```bash filename="Terminal"
+curl "http://localhost:8080/api/analytics/cost?group_by=model&bucket=hour"
+```
+
+### Time-bounded analytics window
+
+```bash filename="Terminal"
+curl "http://localhost:8080/api/analytics/summary?from=FROM_ISO8601&to=TO_ISO8601"
+```
+
+Placeholders:
+- `FROM_ISO8601`: Start timestamp in RFC3339 format.
+- `TO_ISO8601`: End timestamp in RFC3339 format.
+
+## Validation checklist
+
+1. Send proxied traffic through `/openai/...` or `/anthropic/...`.
+2. If `auth.enabled=true`, include your gateway key header on API reads.
+3. Query analytics endpoints:
+
+   ```bash filename="Terminal"
+   curl "http://localhost:8080/api/analytics/usage"
+   curl "http://localhost:8080/api/analytics/cost"
+   curl "http://localhost:8080/api/analytics/models"
+   curl "http://localhost:8080/api/analytics/keys"
+   curl "http://localhost:8080/api/analytics/summary"
+   ```
+
+   If auth is enabled, include the gateway key header:
+
+   ```bash filename="Terminal"
+   curl "http://localhost:8080/api/analytics/summary" \
+     -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
+   ```
+
+   Placeholder:
+   - `GATEWAY_KEY`: Gateway key token with `analytics:read` permission.
+
+You should see:
+- Non-zero totals after successful proxied requests.
+- Grouped series output for usage and cost when `group_by` and `bucket` are
+  provided.
+- `top_model` and `active_keys` fields in summary responses.
+
+## Troubleshooting
+
+### Analytics returns `401` or `403`
+
+- Symptom: Analytics endpoints reject requests.
+- Cause: Missing gateway key, or key lacks `analytics:read`.
+- Fix: Provide a valid gateway key with analytics permission.
+
+### Analytics returns zero totals
+
+- Symptom: Usage and cost totals remain zero.
+- Cause: No proxied traffic has been captured in trace storage.
+- Fix: Send provider requests through gateway routes, then query analytics
+  again.
+
+### Analytics returns `400` for query validation
+
+- Symptom: Request fails with `invalid group_by`, `invalid bucket`, or invalid
+  date range errors.
+- Cause: Unsupported query values.
+- Fix: Use supported values:
+  `group_by=provider|model`, `bucket=hour|day|week`, and `to >= from`.
+
+### Analytics returns `500` or `503`
+
+- Symptom: Analytics endpoint reports backend errors.
+- Cause: Trace store is unavailable or query execution failed.
+- Fix: Verify storage driver configuration and trace store health.
+
+## Next steps
+
+- [Tracing and audit logs](/gateway/capabilities/tracing-and-audit-logs)
+- [Rate limiting and quotas](/gateway/capabilities/rate-limiting-and-quotas)
+- [REST API reference](/gateway/reference/rest-api-reference)

@@ -1,0 +1,52 @@
+---
+title: Get started
+description: Install OngoingAI Gateway, run your first proxied request, and verify traces and analytics.
+related:
+  title: Next steps
+  description: Continue from first traffic to production controls.
+  links:
+    - gateway/capabilities/gateway-auth-rbac-and-key-lifecycle
+    - gateway/capabilities/rate-limiting-and-quotas
+    - gateway/reference/config-reference
+---
+
+Use this section to go from zero to a working OngoingAI Gateway setup.
+You will learn the gateway scope, install the binary, send first traffic, and
+validate trace capture.
+
+## Use this path when
+
+- You are setting up OngoingAI Gateway for the first time.
+- You need a short path to confirm proxy and trace behavior.
+- You are preparing a deployment checklist for your team.
+
+## Prerequisites
+
+- You must have at least one provider API key:
+  `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`.
+- You should have a shell with `curl` available.
+- You should have port `8080` available for local runs.
+
+## Read in this order
+
+1. [What is OngoingAI Gateway](/gateway/get-started/what-is-ongoingai-gateway)
+   to confirm scope, request flow, and product boundaries.
+2. [Install](/gateway/get-started/install)
+   to install and verify the `ongoingai` binary.
+3. [Quickstart](/gateway/get-started/quickstart)
+   to proxy one request and verify traces and analytics.
+4. [Upgrade and compatibility](/gateway/get-started/upgrade-and-compatibility)
+   to plan upgrades, backups, and rollback steps.
+
+## Completion checklist
+
+- The gateway starts and listens on your configured address.
+- At least one provider request succeeds through the gateway.
+- Trace data appears in the gateway API.
+- You have a clear next step for auth, limits, or configuration hardening.
+
+## Next steps
+
+- [Configure gateway keys and policy](/gateway/capabilities/gateway-auth-rbac-and-key-lifecycle)
+- [Set request and usage limits](/gateway/capabilities/rate-limiting-and-quotas)
+- [Review full configuration options](/gateway/reference/config-reference)

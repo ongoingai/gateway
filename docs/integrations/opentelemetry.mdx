@@ -1,0 +1,356 @@
+---
+title: OpenTelemetry
+description: Export distributed traces and gateway metrics to any OTLP-compatible collector over HTTP.
+related:
+  title: Next steps
+  description: Continue with trace model details, pull-based integrations, and config reference.
+  links:
+    - gateway/core-concepts/traces-and-audit-model
+    - gateway/capabilities/integrations-and-exporters
+    - gateway/reference/config-reference
+---
+
+Use this page to configure OpenTelemetry (OTEL) trace and metric export from
+OngoingAI Gateway to an OTLP-compatible collector.
+
+## When to use this integration
+
+- You run an observability stack that accepts OTLP data, such as Jaeger,
+  Grafana Tempo, Datadog, Honeycomb, or a standalone OpenTelemetry Collector.
+- You need distributed tracing across the gateway and upstream provider calls.
+- You need gateway-level operational metrics for queue health and write
+  reliability.
+- You want tenant-scoped span attributes for multi-tenant observability
+  filtering.
+
+## How it works
+
+When enabled, the gateway creates two OTLP HTTP exporters at startup:
+
+1. A **trace exporter** that batches and sends spans to your collector.
+2. A **metric exporter** that periodically pushes counters and gauges.
+
+The gateway wraps its HTTP server and upstream transport with OpenTelemetry
+instrumentation. Each inbound request produces a server span, and each upstream
+proxy call produces a client span as a child of the server span. After
+authentication completes, a span enrichment middleware adds tenant identity
+attributes to the active span.
+
+Trace context propagates using the
+[W3C Trace Context](https://www.w3.org/TR/trace-context/) standard.
+
+## Configuration
+
+### YAML configuration
+
+Add an `observability.otel` section to `ongoingai.yaml`:
+
+```yaml filename="ongoingai.yaml"
+observability:
+  otel:
+    enabled: true
+    endpoint: localhost:4318
+    insecure: true
+    service_name: ongoingai-gateway
+    traces_enabled: true
+    metrics_enabled: true
+    sampling_ratio: 1.0
+    export_timeout_ms: 3000
+    metric_export_interval_ms: 10000
+```
+
+### Field reference
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `observability.otel.enabled` | bool | `false` | Master toggle. Set to `true` to activate OTEL export. |
+| `observability.otel.endpoint` | string | `localhost:4318` | OTLP HTTP collector endpoint. Accepts `host:port` or a full URL. |
+| `observability.otel.insecure` | bool | `true` | Use plain HTTP. Set to `false` for HTTPS. |
+| `observability.otel.service_name` | string | `ongoingai-gateway` | Value for the `service.name` resource attribute. |
+| `observability.otel.traces_enabled` | bool | `true` | Enable trace span export. |
+| `observability.otel.metrics_enabled` | bool | `true` | Enable metric export. |
+| `observability.otel.sampling_ratio` | float | `1.0` | Trace sampling ratio from `0.0` (none) to `1.0` (all). Uses parent-based sampling with trace ID ratio. |
+| `observability.otel.export_timeout_ms` | int | `3000` | Timeout in milliseconds for each export request to the collector. |
+| `observability.otel.metric_export_interval_ms` | int | `10000` | Interval in milliseconds between periodic metric exports. |
+
+### Environment variables
+
+The gateway also accepts standard OpenTelemetry environment variables.
+These follow the same precedence as other env overrides: they apply after YAML
+values.
+
+| Variable | Effect |
+| --- | --- |
+| `OTEL_SDK_DISABLED` | Set to `true` to disable OTEL entirely. |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP collector endpoint. If set, OTEL is auto-enabled. |
+| `OTEL_EXPORTER_OTLP_INSECURE` | Set to `true` for plain HTTP transport. |
+| `OTEL_SERVICE_NAME` | Override `service_name`. |
+| `OTEL_TRACES_EXPORTER` | Set to `otlp` to enable traces, or `none` to disable. |
+| `OTEL_METRICS_EXPORTER` | Set to `otlp` to enable metrics, or `none` to disable. |
+| `OTEL_TRACES_SAMPLER_ARG` | Sampling ratio as a float (for example, `0.5`). |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | Export timeout in milliseconds. |
+| `OTEL_METRIC_EXPORT_INTERVAL` | Metric export interval in milliseconds. |
+
+Setting `OTEL_EXPORTER_OTLP_ENDPOINT` to a non-empty value automatically
+enables OTEL export, even if `observability.otel.enabled` is `false` in YAML.
+
+### Endpoint format
+
+The `endpoint` field accepts two formats:
+
+- **Host and port**: `localhost:4318` or `collector.internal:4318`. The
+  `insecure` field controls whether the gateway uses HTTP or HTTPS.
+- **Full URL**: `http://collector.internal:4318` or
+  `https://collector.example.com:4318`. The URL scheme overrides the `insecure`
+  setting. An `http://` scheme forces insecure mode, and an `https://` scheme
+  forces secure mode.
+
+## Traces
+
+### Inbound request spans
+
+The gateway creates a server span for each incoming HTTP request. The span name
+uses the route pattern:
+
+| Request path | Span name |
+| --- | --- |
+| `/openai/...` | `POST /openai/*` |
+| `/anthropic/...` | `GET /anthropic/*` |
+| `/api/...` | `POST /api/*` |
+| Other paths | `POST /other` |
+
+The HTTP method in the span name matches the actual request method.
+
+### Upstream proxy spans
+
+Each request forwarded to an upstream provider creates a child client span. The
+span name is prefixed with `proxy`:
+
+| Request path | Span name |
+| --- | --- |
+| `/openai/...` | `proxy POST /openai/*` |
+| `/anthropic/...` | `proxy POST /anthropic/*` |
+
+### Gateway attributes
+
+After authentication completes, the gateway adds tenant identity attributes to
+the active span:
+
+| Attribute | Description |
+| --- | --- |
+| `gateway.org_id` | Organization ID from the authenticated gateway key. |
+| `gateway.workspace_id` | Workspace ID from the authenticated gateway key. |
+| `gateway.key_id` | Gateway API key identifier. |
+| `gateway.role` | Role assigned to the gateway key. |
+
+These attributes are only added when `auth.enabled=true` and the request
+authenticates successfully.
+
+### Error handling
+
+The gateway sets span status to `Error` for HTTP 5xx responses from upstream
+providers. The status message includes the HTTP status code, such as `http 502`.
+HTTP 4xx responses do not set error status on the span.
+
+### Resource attributes
+
+All spans and metrics include the following resource attributes:
+
+| Attribute | Value |
+| --- | --- |
+| `service.name` | Value of `observability.otel.service_name`. |
+| `service.version` | Gateway binary version. |
+
+## Metrics
+
+The gateway exports two custom counters:
+
+### `ongoingai.trace.queue_dropped_total`
+
+Counts trace records dropped because the async trace queue was full.
+
+| Attribute | Description |
+| --- | --- |
+| `route` | Route pattern such as `/openai/*` or `/api/*`. |
+| `status_code` | HTTP response status code. |
+
+### `ongoingai.trace.write_failed_total`
+
+Counts trace records dropped after a storage write failure.
+
+| Attribute | Description |
+| --- | --- |
+| `operation` | Write operation that failed, such as `write_trace` or `write_batch_fallback`. |
+
+Both counters help you detect trace pipeline backpressure and storage issues
+before they affect audit completeness. A sustained increase in either counter
+indicates that trace data is being lost.
+
+## Shutdown behavior
+
+On `SIGINT` or `SIGTERM`, the gateway flushes pending telemetry data before
+exiting:
+
+1. The HTTP server stops accepting new connections and completes in-flight
+   requests (5-second timeout).
+2. The trace writer drains its queue and flushes remaining trace records to
+   storage (5-second timeout).
+3. The OpenTelemetry trace provider flushes buffered spans to the collector
+   (5-second timeout).
+4. The OpenTelemetry metric provider flushes buffered metrics to the collector
+   (5-second timeout).
+
+If any flush step exceeds its timeout, the gateway logs an error and continues
+with the remaining shutdown steps.
+
+## Example configurations
+
+### Local development with Jaeger
+
+Start Jaeger with OTLP ingestion:
+
+```bash filename="Terminal"
+docker run -d --name jaeger \
+  -p 16686:16686 \
+  -p 4318:4318 \
+  jaegertracing/all-in-one:latest
+```
+
+Configure the gateway to export to Jaeger:
+
+```yaml filename="ongoingai.yaml"
+observability:
+  otel:
+    enabled: true
+    endpoint: localhost:4318
+    insecure: true
+    service_name: ongoingai-gateway
+    traces_enabled: true
+    metrics_enabled: false
+    sampling_ratio: 1.0
+```
+
+After sending traffic through the gateway, open `http://localhost:16686` to view
+traces in the Jaeger UI.
+
+### Production with an OTLP collector
+
+Configure the gateway to export to a remote collector over HTTPS:
+
+```yaml filename="ongoingai.yaml"
+observability:
+  otel:
+    enabled: true
+    endpoint: https://otel-collector.internal:4318
+    service_name: ongoingai-gateway
+    traces_enabled: true
+    metrics_enabled: true
+    sampling_ratio: 0.1
+    export_timeout_ms: 5000
+    metric_export_interval_ms: 30000
+```
+
+In production, consider reducing `sampling_ratio` to control trace volume. A
+ratio of `0.1` samples 10% of requests. Parent-based sampling ensures that if
+an incoming request already carries a sampled trace context, the gateway
+respects that decision regardless of the local ratio.
+
+### Environment variable quickstart
+
+Enable OTEL export without modifying YAML:
+
+```bash filename="Terminal"
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
+OTEL_SERVICE_NAME=ongoingai-gateway \
+ongoingai serve --config ongoingai.yaml
+```
+
+## Validation checklist
+
+1. Verify that your OTLP collector is reachable from the gateway host:
+
+   ```bash filename="Terminal"
+   curl -s -o /dev/null -w "%{http_code}" http://localhost:4318/v1/traces
+   ```
+
+   A `405` or `200` response confirms the collector is listening.
+
+2. Start the gateway with OTEL enabled:
+
+   ```bash filename="Terminal"
+   ongoingai serve --config ongoingai.yaml
+   ```
+
+3. Send a proxied request through the gateway:
+
+   ```bash filename="Terminal"
+   curl http://localhost:8080/openai/v1/chat/completions \
+     -H "Authorization: Bearer OPENAI_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "hello"}]}'
+   ```
+
+   Placeholder:
+   - `OPENAI_API_KEY`: Your OpenAI API key.
+
+4. Check your collector or tracing UI for spans with service name
+   `ongoingai-gateway`.
+
+You should see at least two spans: one for the inbound request and one for the
+upstream proxy call.
+
+## Troubleshooting
+
+### Spans do not appear in the collector
+
+- Symptom: The tracing UI shows no data for `ongoingai-gateway`.
+- Cause: OTEL is not enabled, or the collector endpoint is unreachable.
+- Fix: Verify that `observability.otel.enabled` is `true` and that the
+  `endpoint` value is reachable from the gateway. Check gateway logs for export
+  timeout errors.
+
+### Gateway attributes are missing from spans
+
+- Symptom: Spans appear but lack `gateway.org_id`, `gateway.workspace_id`, and
+  other tenant attributes.
+- Cause: Gateway auth is not enabled, or the request did not include a valid
+  gateway key.
+- Fix: Set `auth.enabled=true` and include a valid gateway key in the request
+  header.
+
+### Sampling drops more traces than expected
+
+- Symptom: Only a fraction of requests produce spans.
+- Cause: `sampling_ratio` is set below `1.0`.
+- Fix: Increase `sampling_ratio` toward `1.0` for higher coverage. A value of
+  `1.0` samples all requests.
+
+### Export timeout errors in gateway logs
+
+- Symptom: Gateway logs contain export timeout errors on shutdown or during
+  operation.
+- Cause: The collector is slow to respond, or `export_timeout_ms` is too low
+  for your network.
+- Fix: Increase `export_timeout_ms` or verify collector performance.
+
+### Metrics are not exported
+
+- Symptom: Traces appear in the collector but metrics do not.
+- Cause: `metrics_enabled` is `false`, or the collector does not accept OTLP
+  metrics on the configured endpoint.
+- Fix: Set `metrics_enabled` to `true` and verify that the collector supports
+  OTLP metric ingestion on the same endpoint.
+
+### Config validation fails with OTEL settings
+
+- Symptom: `ongoingai config validate` rejects the OTEL configuration.
+- Cause: A required field is empty or a numeric value is out of range.
+- Fix: Verify that `endpoint` and `service_name` are non-empty, that
+  `sampling_ratio` is between `0.0` and `1.0`, and that timeout values are
+  positive integers.
+
+## Next steps
+
+- [Traces and audit model](/gateway/core-concepts/traces-and-audit-model)
+- [Pull-based integrations and exporters](/gateway/capabilities/integrations-and-exporters)
+- [Config reference](/gateway/reference/config-reference)

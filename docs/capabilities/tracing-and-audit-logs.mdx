@@ -1,0 +1,151 @@
+---
+title: Tracing and audit logs
+description: Capture request traces, query analytics endpoints, and emit audit events for gateway auth and key lifecycle actions.
+related:
+  title: Next steps
+  description: Continue with privacy controls and API details.
+  links:
+    - gateway/capabilities/privacy-and-sensitive-data-handling
+    - gateway/reference/rest-api-reference
+    - gateway/core-concepts/traces-and-audit-model
+---
+
+Use this page to enable and validate tracing behavior in OngoingAI Gateway.
+It covers trace capture, audit event signals, and failure semantics.
+
+## Trace coverage
+
+- Captures one trace record for each proxied provider request.
+- Exposes trace and analytics data through HTTP API endpoints.
+- Emits audit signals for gateway auth denies and gateway key lifecycle actions.
+- Preserves streaming metadata such as chunk count and time to first token.
+
+## Operational fit
+
+- You need request-level debugging data for incidents.
+- You need auditability for access decisions and key operations.
+- You need tenant-scoped usage visibility by key, model, and provider.
+
+## Capture lifecycle
+
+1. Capture middleware records request and response exchange data.
+2. Trace building extracts model, token, latency, cost, and tenant metadata.
+3. Sensitive headers are redacted before persistence.
+4. Async trace writer stores traces with a bounded queue.
+5. API handlers return trace and analytics views from the trace store.
+6. Auth and key handlers emit structured audit log events.
+
+If trace persistence falls behind, proxy forwarding continues. Trace records may
+be dropped when the queue is full, and failures are logged.
+
+## Recommended baseline
+
+```yaml filename="ongoingai.yaml"
+tracing:
+  capture_bodies: false
+  body_max_size: 1048576
+pii:
+  mode: "" # auto (off when body capture is disabled)
+```
+
+With `capture_bodies=false`, bodies are not stored in traces. The gateway still
+parses provider responses to extract model and usage metadata.
+
+## Deployment patterns
+
+- Metadata-only capture in production:
+  `capture_bodies=false`.
+- Incident window capture in controlled environments:
+  `capture_bodies=true` with `pii.mode=redact_storage`.
+- Lower body risk profile:
+  reduce `body_max_size`.
+
+## Example setups
+
+### Metadata-only baseline
+
+```yaml filename="ongoingai.yaml"
+tracing:
+  capture_bodies: false
+  body_max_size: 1048576
+```
+
+### Short-term payload capture with storage redaction
+
+```yaml filename="ongoingai.yaml"
+tracing:
+  capture_bodies: true
+  body_max_size: 262144
+pii:
+  mode: redact_storage
+  policy_id: default/v1
+```
+
+## Validation checklist
+
+1. Send one proxied request through `/openai/...` or `/anthropic/...`.
+2. If `auth.enabled=true`, include your gateway key header on API reads.
+   Default header name is `X-OngoingAI-Gateway-Key`.
+3. Query traces:
+
+   ```bash filename="Terminal"
+   curl "http://localhost:8080/api/traces?limit=10"
+   ```
+
+4. Query one trace detail by ID:
+
+   ```bash filename="Terminal"
+   curl "http://localhost:8080/api/traces/TRACE_ID"
+   ```
+
+   Placeholder:
+   - `TRACE_ID`: Trace ID returned from `/api/traces`.
+
+5. Query analytics summary:
+
+   ```bash filename="Terminal"
+   curl "http://localhost:8080/api/analytics/summary"
+   ```
+
+You should see:
+- At least one trace item for routed provider traffic.
+- Token and cost aggregates in analytics summary.
+- Streaming traces with `time_to_first_token_ms` and `stream_chunks` metadata
+  when streaming endpoints are used.
+
+## Troubleshooting
+
+### `/api/traces` returns no items
+
+- Symptom: Trace list is empty.
+- Cause: Requests did not go through provider routes, or upstream request failed
+  before capture.
+- Fix: Send traffic through `/openai/...` or `/anthropic/...`, then query traces
+  again.
+
+### Logs show `trace queue is full; dropping trace`
+
+- Symptom: Trace drops are logged under high load.
+- Cause: Trace writer queue is saturated while storage writes lag.
+- Fix: Reduce capture load (for example disable body capture), increase storage
+  throughput, and verify store health.
+
+### Trace body fields are empty
+
+- Symptom: `request_body` and `response_body` are empty in trace detail.
+- Cause: `tracing.capture_bodies=false`, or redaction dropped body persistence.
+- Fix: Enable body capture when needed and confirm privacy settings.
+
+### Audit events are missing in logs
+
+- Symptom: No auth deny or key lifecycle audit lines appear.
+- Cause: Relevant events were not triggered, or structured logs are not being
+  collected.
+- Fix: Trigger a known deny case (`401`/`403`) or key lifecycle action, then
+  verify log ingestion.
+
+## Next steps
+
+- [Traces and audit model](/gateway/core-concepts/traces-and-audit-model)
+- [Privacy and sensitive-data handling](/gateway/capabilities/privacy-and-sensitive-data-handling)
+- [REST API reference](/gateway/reference/rest-api-reference)

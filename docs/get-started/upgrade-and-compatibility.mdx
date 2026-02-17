@@ -1,0 +1,159 @@
+---
+title: Upgrade and compatibility
+description: Safely upgrade OngoingAI Gateway and verify client and storage compatibility.
+related:
+  title: Next steps
+  description: Continue with operations and troubleshooting guidance.
+  links:
+    - gateway/reference/config-reference
+    - gateway/help/troubleshooting
+    - gateway/help/changelog-and-release-notes
+---
+
+Use this page to upgrade OngoingAI Gateway with predictable results.
+You will back up storage, validate config, restart with the target binary, and
+verify proxy and API behavior.
+
+## Choose this runbook when
+
+- You are moving to a newer gateway binary.
+- You need a repeatable upgrade checklist for production.
+- You need clear rollback steps before deployment.
+
+## Compatibility baseline
+
+OngoingAI Gateway maintains compatibility with:
+
+- OpenAI-compatible clients using `/openai/v1` (or your configured prefix).
+- Anthropic clients using `/anthropic` (or your configured prefix).
+- SQLite and Postgres trace storage backends.
+- Startup-applied embedded migrations for supported storage drivers.
+
+If `auth.enabled=true`, clients must send both:
+
+- A valid gateway key in the configured auth header
+  (default: `X-OngoingAI-Gateway-Key`).
+- A valid upstream provider credential in the proxied request.
+
+## Before you upgrade
+
+- You must know your current version and target version.
+- You must know your config path (for example, `ongoingai.yaml`).
+- You must back up active storage before restart.
+- You should schedule upgrades in a low-traffic window or use canary rollout.
+
+## Upgrade procedure
+
+1. Check the currently installed version.
+
+   ```bash filename="Terminal"
+   ongoingai version
+   ```
+
+2. Back up trace storage.
+
+   If you use `storage.driver=sqlite`, run:
+
+   ```bash filename="Terminal"
+   mkdir -p ./backup
+   cp ./data/ongoingai.db ./backup/ongoingai-YYYYMMDD.db
+   ```
+
+   If your config uses a custom `storage.path`, back up that file instead.
+
+   If you use `storage.driver=postgres`, run:
+
+   ```bash filename="Terminal"
+   mkdir -p ./backup
+   pg_dump "POSTGRES_DSN" > ./backup/ongoingai-YYYYMMDD.sql
+   ```
+
+   Replace `POSTGRES_DSN` with your Postgres connection string.
+
+3. Install the target binary.
+
+   ```bash filename="Terminal"
+   curl -sSL https://ongoingai.dev/install.sh | sh
+   ongoingai version
+   ```
+
+   You should see the target version string.
+
+4. Validate config with the target binary.
+
+   ```bash filename="Terminal"
+   ongoingai config validate --config ongoingai.yaml
+   ```
+
+   You should see `config is valid`.
+
+5. Restart the gateway with the validated config.
+
+   ```bash filename="Terminal"
+   ongoingai serve --config ongoingai.yaml
+   ```
+
+6. Verify post-upgrade service behavior.
+
+   ```bash filename="Terminal"
+   curl "http://localhost:8080/api/health"
+   curl "http://localhost:8080/api/traces?limit=1"
+   curl "http://localhost:8080/api/analytics/summary"
+   ```
+
+   You should see:
+   - `status: "ok"` from `/api/health`
+   - Successful responses from traces and analytics endpoints
+
+## Migration behavior
+
+- Migrations are embedded in the binary and applied at startup.
+- Migration state is tracked in `schema_migrations`.
+- Routine upgrades do not require a separate migration command.
+
+If schema initialization fails, startup exits with an error. Fix storage or
+schema issues, then restart.
+
+## Rollback steps
+
+1. Stop the upgraded gateway process.
+2. Restore the previous gateway binary.
+3. If needed, restore the pre-upgrade storage backup.
+4. Start the previous binary with the same config.
+
+Treat schema changes as forward upgrades. If rollback behavior is inconsistent,
+restore the backup you created before the upgrade.
+
+## Troubleshooting
+
+### `config validate` fails after upgrade
+
+- Symptom: `ongoingai config validate` returns `config is invalid`.
+- Cause: One or more config fields are invalid for the running binary.
+- Fix: Correct the reported field, rerun validation, then restart.
+
+### Startup fails on storage initialization
+
+- Symptom: `ongoingai serve` exits with sqlite or postgres initialization
+  errors.
+- Cause: Invalid storage path, permission, DSN, or schema setup.
+- Fix: Verify storage configuration and database access, then restart.
+
+### Clients return `404` on provider routes
+
+- Symptom: Existing requests fail with `404 page not found`.
+- Cause: Provider route prefixes changed, but client base URLs did not.
+- Fix: Update client base URLs, or rerun `eval "$(ongoingai shell-init)"`.
+
+### Clients return `401` for gateway auth
+
+- Symptom: Responses return `missing or invalid gateway key`.
+- Cause: `auth.enabled=true` and requests do not include a valid gateway key.
+- Fix: Send the configured gateway auth header and keep provider credentials in
+  the same request.
+
+## Next steps
+
+- [Review configuration details](/gateway/reference/config-reference)
+- [Use troubleshooting playbooks](/gateway/help/troubleshooting)
+- [Review changelog and release notes](/gateway/help/changelog-and-release-notes)

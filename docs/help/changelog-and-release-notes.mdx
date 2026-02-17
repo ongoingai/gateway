@@ -1,0 +1,119 @@
+---
+title: Changelog and release notes
+description: Track gateway behavior changes, release status, and upgrade-impact notes with the correct source documents.
+related:
+  title: Next steps
+  description: Continue with upgrade guidance, contribution workflow, and CLI verification commands.
+  links:
+    - gateway/get-started/upgrade-and-compatibility
+    - gateway/help/contributing
+    - gateway/reference/cli-reference
+---
+
+Use this page to track what changed between gateway versions.
+Use it before upgrades and before publishing release tags.
+
+## Use this page when
+
+- You are planning an upgrade and need behavior-change details.
+- You are validating a tagged release and release artifacts.
+- You are preparing a pull request that changes runtime behavior.
+
+## Source of truth
+
+- `RELEASE_NOTES.md`: Maintainer-authored release notes and milestone scope.
+- [GitHub releases](https://github.com/ongoingai/gateway/releases):
+  tagged release artifacts and generated release summaries.
+- `release/version.conf`: Active major/minor stream for auto patch tags.
+- `.github/workflows/ci.yml`, `.github/workflows/auto-tag.yml`,
+  `.github/workflows/release.yml`: Release pipeline behavior.
+
+## Read release state quickly
+
+1. Check the running gateway version.
+
+   ```bash filename="Terminal"
+   ongoingai version
+   ```
+
+2. Check recent local release tags.
+
+   ```bash filename="Terminal"
+   git tag --list "v*" | sort -V | tail -n 10
+   ```
+
+3. Check the next auto tag for the configured stream.
+
+   ```bash filename="Terminal"
+   make version-next
+   ```
+
+You should see a semantic version tag such as `v1.1.4`.
+
+## Release workflow summary
+
+1. Pushes to `main` and pull requests run CI checks.
+   CI includes formatting checks, `go vet`, tests, race tests, and build jobs.
+2. A successful push to `main` triggers auto-tagging.
+   Auto-tagging reads `release/version.conf` and creates the next patch tag
+   (`vX.Y.Z`).
+3. Tag pushes matching `v*` trigger release publishing.
+   Release workflow runs tests, builds cross-platform binaries, generates
+   checksums, publishes GitHub release assets, and pushes multi-arch images to
+   GHCR.
+
+## Upgrade-impact checklist
+
+Before upgrading:
+
+1. Read the target section in `RELEASE_NOTES.md`.
+2. Verify tagged artifacts and checksums in GitHub Releases.
+3. Validate config with the target binary:
+
+   ```bash filename="Terminal"
+   ongoingai config validate --config ongoingai.yaml
+   ```
+
+4. Follow the [upgrade and compatibility runbook](/gateway/get-started/upgrade-and-compatibility).
+
+## Contributor expectations for release notes
+
+- If your pull request changes runtime behavior, API behavior, auth policy,
+  storage behavior, or CLI behavior, you should update `RELEASE_NOTES.md` in
+  the same pull request.
+- Keep notes concrete and operator-focused:
+  what changed, who is affected, and what action is required.
+- Include upgrade-impact callouts for any behavior that can change existing
+  deployments.
+
+## Troubleshooting
+
+### `make version-next` fails
+
+- Symptom: Command exits with a version-config error.
+- Cause: `release/version.conf` is missing or `base_version` format is
+  invalid.
+- Fix: Restore the file and set `base_version` to `X.Y`, then rerun
+  `make version-next`.
+
+### Auto tag is not created after merge to main
+
+- Symptom: CI passed on `main`, but no new `vX.Y.Z` tag appears.
+- Cause: Auto-tag conditions were not met or workflow write permission is
+  missing.
+- Fix: Check `.github/workflows/auto-tag.yml` run status and repository
+  Actions permission settings.
+
+### Release artifacts are missing for a tag
+
+- Symptom: Tag exists, but binaries or checksums are not present in GitHub
+  Releases.
+- Cause: `.github/workflows/release.yml` failed or did not run.
+- Fix: Check workflow run logs for the tag and re-run after fixing the
+  failing step.
+
+## Next steps
+
+- [Upgrade and compatibility](/gateway/get-started/upgrade-and-compatibility)
+- [Contributing](/gateway/help/contributing)
+- [CLI reference](/gateway/reference/cli-reference)

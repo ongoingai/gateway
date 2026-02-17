@@ -1,0 +1,240 @@
+---
+title: CLI reference
+description: Use ongoingai commands to start the gateway, validate config, set SDK base URLs, and wrap client commands.
+related:
+  title: Next steps
+  description: Continue with config details, env overrides, and API contracts.
+  links:
+    - gateway/reference/config-reference
+    - gateway/reference/env-var-reference
+    - gateway/reference/rest-api-reference
+---
+
+Use this page to run OngoingAI Gateway from the command line.
+It documents command syntax, flags, output behavior, and exit codes.
+
+## Quick command map
+
+```bash filename="Terminal"
+ongoingai serve [--config PATH]
+ongoingai version
+ongoingai --version
+ongoingai -v
+ongoingai config validate [--config PATH]
+ongoingai shell-init [--config PATH]
+ongoingai wrap [--config PATH] -- <command> [args...]
+```
+
+By default, commands read config from `ongoingai.yaml`.
+If the config file is missing, defaults and supported env overrides are used.
+
+Use `ongoingai serve` for normal runtime, and use `config validate` in CI or
+deployment gates before restart.
+
+## Command intent
+
+| Command | Purpose |
+| --- | --- |
+| `serve` | Start the gateway HTTP server. |
+| `version` | Print gateway version string. |
+| `config validate` | Load and validate config, then exit. |
+| `shell-init` | Print shell exports for provider base URLs. |
+| `wrap` | Run another command with gateway base URLs injected into env. |
+
+## Command reference
+
+### `ongoingai serve`
+
+Start the gateway server with proxy routes and API routes.
+
+Syntax:
+
+```bash filename="Terminal"
+ongoingai serve [--config PATH]
+```
+
+Flags:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--config` | string | `ongoingai.yaml` | Path to config file. |
+
+Behavior:
+- Loads and validates config before startup.
+- Initializes storage and auth components.
+- Logs structured JSON lines to stdout.
+- Shuts down on `SIGINT` or `SIGTERM`.
+
+Exit codes:
+- `0`: Clean shutdown.
+- `1`: Startup or runtime failure.
+- `2`: Flag parse error.
+
+Example:
+
+```bash filename="Terminal"
+ongoingai serve --config ongoingai.yaml
+```
+
+### `ongoingai version` (`--version`, `-v`)
+
+Print the gateway version string and exit.
+
+Syntax:
+
+```bash filename="Terminal"
+ongoingai version
+ongoingai --version
+ongoingai -v
+```
+
+Output:
+- A single version string on stdout.
+
+Exit codes:
+- `0`: Success.
+
+### `ongoingai config validate`
+
+Validate configuration without starting the server.
+
+Syntax:
+
+```bash filename="Terminal"
+ongoingai config validate [--config PATH]
+```
+
+Flags:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--config` | string | `ongoingai.yaml` | Path to config file. |
+
+Behavior:
+- Loads config with defaults and env overrides.
+- Runs schema and runtime validation checks.
+- Rejects positional arguments.
+
+Output:
+- Success: `config is valid: PATH`
+- Failure: `config is invalid: ...`
+
+Exit codes:
+- `0`: Config is valid.
+- `1`: Config load or validation failed.
+- `2`: Usage or argument parse error.
+
+Example:
+
+```bash filename="Terminal"
+ongoingai config validate --config ongoingai.yaml
+```
+
+### `ongoingai shell-init`
+
+Print shell exports for `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL`.
+
+Syntax:
+
+```bash filename="Terminal"
+ongoingai shell-init [--config PATH]
+```
+
+Flags:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--config` | string | `ongoingai.yaml` | Path to config file. |
+
+Behavior:
+- Builds base URLs from server host, server port, and provider prefixes.
+- Maps wildcard hosts such as `0.0.0.0` to `localhost` in generated URLs.
+- Rejects positional arguments.
+
+Output:
+- `export OPENAI_BASE_URL=...`
+- `export ANTHROPIC_BASE_URL=...`
+
+Exit codes:
+- `0`: Success.
+- `1`: Config load failed.
+- `2`: Usage or argument parse error.
+
+Example:
+
+```bash filename="Terminal"
+eval "$(ongoingai shell-init)"
+```
+
+### `ongoingai wrap`
+
+Run another command with gateway provider base URLs injected into env.
+
+Syntax:
+
+```bash filename="Terminal"
+ongoingai wrap [--config PATH] -- <command> [args...]
+```
+
+Flags:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--config` | string | `ongoingai.yaml` | Path to config file. |
+
+Behavior:
+- Loads config, then computes gateway base URLs.
+- Sets `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL` for the wrapped command.
+- Preserves other existing environment variables.
+- Streams wrapped command stdout and stderr directly.
+
+Exit codes:
+- `0`: Wrapped command exited successfully.
+- Wrapped command exit code: Propagated as-is on command failure.
+- `1`: Config load failed or command failed to start.
+- `2`: Usage or argument parse error.
+
+Examples:
+
+```bash filename="Terminal"
+ongoingai wrap -- python my_ai_script.py
+ongoingai wrap -- claude-code "summarize recent traces"
+```
+
+## Process-level behavior
+
+- `ongoingai` with no subcommand is equivalent to `ongoingai serve`.
+- Unknown subcommands print usage and return exit code `2`.
+- `config` without a subcommand prints config usage and returns exit code `2`.
+
+## CLI troubleshooting
+
+### Command exits with code `2`
+
+- Symptom: CLI returns code `2` and prints usage output.
+- Cause: Unknown command, invalid flags, or invalid positional args.
+- Fix: Use one supported command form from the usage section.
+
+### `shell-init` prints values but SDK still uses old base URL
+
+- Symptom: Client traffic bypasses gateway routes.
+- Cause: Shell exports were printed but not evaluated.
+- Fix: Run `eval "$(ongoingai shell-init)"` in the active shell.
+
+### `wrap` returns `failed to start command`
+
+- Symptom: Wrapped command does not start.
+- Cause: Command binary is missing or not in `PATH`.
+- Fix: Install the command or pass an absolute binary path.
+
+### `config validate` reports `config is invalid`
+
+- Symptom: Validation fails before startup.
+- Cause: One or more config fields fail validation rules.
+- Fix: Correct the reported field, then run validation again.
+
+## Next steps
+
+- [Config reference](/gateway/reference/config-reference)
+- [Environment variable reference](/gateway/reference/env-var-reference)
+- [REST API reference](/gateway/reference/rest-api-reference)

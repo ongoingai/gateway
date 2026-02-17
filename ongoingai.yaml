@@ -1,0 +1,85 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+
+storage:
+  driver: sqlite
+  path: ./data/ongoingai.db
+  # dsn: postgres://user:password@localhost:5432/ongoingai?sslmode=disable
+
+providers:
+  openai:
+    upstream: https://api.openai.com
+    prefix: /openai
+  anthropic:
+    upstream: https://api.anthropic.com
+    prefix: /anthropic
+
+tracing:
+  capture_bodies: false
+  body_max_size: 1048576
+
+observability:
+  otel:
+    enabled: false
+    endpoint: localhost:4318
+    insecure: true
+    service_name: ongoingai-gateway
+    traces_enabled: true
+    metrics_enabled: true
+    sampling_ratio: 1.0
+    export_timeout_ms: 3000
+    metric_export_interval_ms: 10000
+
+pii:
+  # empty mode follows safe defaults:
+  # - when tracing.capture_bodies=false -> off
+  # - when tracing.capture_bodies=true  -> redact_storage
+  # supported modes: off, redact_storage, redact_upstream, block
+  # redact_upstream/block are fail-closed on policy-evaluation uncertainty
+  mode: ""
+  policy_id: default/v1
+  # scopes are optional overrides. The most specific matching scope wins.
+  # ties on specificity resolve by declaration order (first wins).
+  # scopes:
+  #   - match:
+  #       workspace_id: workspace-compliance
+  #       provider: openai
+  #       route_prefix: /openai/v1/chat
+  #     mode: block
+  #     policy_id: workspace-compliance/v1
+  stages:
+    request_headers: true
+    request_body: true
+    response_headers: true
+    response_body: true
+  detectors:
+    email: true
+    phone: true
+    ssn: true
+    token_like: true
+  headers:
+    denylist:
+      - authorization
+      - cookie
+      - set-cookie
+      - x-api-key
+      - x-ongoingai-gateway-key
+  body:
+    key_denylist:
+      - email
+      - phone
+      - password
+      - token
+      - secret
+      - ssn
+      - api_key
+      - authorization
+  replacement:
+    format: "[{type}_REDACTED:{hash}]"
+    hash_salt: ""
+
+auth:
+  enabled: false
+  header: X-OngoingAI-Gateway-Key
+  keys: []

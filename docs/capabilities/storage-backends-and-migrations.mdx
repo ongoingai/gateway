@@ -1,0 +1,214 @@
+---
+title: Storage backends and migrations
+description: Configure SQLite or Postgres trace storage, understand startup migration behavior, and verify schema state after deploys.
+related:
+  title: Next steps
+  description: Continue with upgrade safety, tracing operations, and config details.
+  links:
+    - gateway/get-started/upgrade-and-compatibility
+    - gateway/capabilities/tracing-and-audit-logs
+    - gateway/reference/config-reference
+---
+
+Use this page to choose a storage backend and understand migration behavior in
+OngoingAI Gateway.
+It covers startup initialization, compatibility updates, and verification steps.
+
+## Storage responsibilities
+
+- Stores traces and analytics data in `sqlite` or `postgres`.
+- Applies embedded SQL migrations automatically at gateway startup.
+- Tracks applied migrations in `schema_migrations`.
+- Reconciles legacy schema differences with compatibility updates.
+- Exposes active storage backend details through `/api/health`.
+
+## Operational fit
+
+- You need a simple single-node default with local persistence (`sqlite`).
+- You need shared-team runtime storage and key lifecycle APIs (`postgres`).
+- You need predictable startup migration behavior across upgrades.
+
+## Startup lifecycle
+
+1. Config validation checks `storage.driver`, `storage.path`, and `storage.dsn`.
+2. Gateway startup initializes the selected trace store.
+3. The trace store applies embedded migrations for that driver.
+4. Compatibility logic adds missing columns and indexes for legacy schemas.
+5. In Postgres mode, tenant schema and traces row-level security are enforced.
+6. The async trace writer starts after storage initialization succeeds.
+7. If storage initialization or schema setup fails, startup exits with a
+   non-zero code.
+
+The gateway has no separate migration command for routine deploys.
+
+## Starter storage config
+
+### SQLite (default)
+
+```yaml filename="ongoingai.yaml"
+storage:
+  driver: sqlite
+  path: ./data/ongoingai.db
+```
+
+### Postgres
+
+```yaml filename="ongoingai.yaml"
+storage:
+  driver: postgres
+  dsn: postgres://USER:PASSWORD@HOST:5432/DB?sslmode=disable
+```
+
+If you use `sqlite`, you must set `storage.path`.
+If you use `postgres`, you must set `storage.dsn`.
+
+## Deployment patterns
+
+- Local or single-node runtime:
+  `storage.driver=sqlite` with a persistent disk path.
+- Team or multi-instance runtime:
+  `storage.driver=postgres` with managed Postgres.
+- Environment override for deployment pipelines:
+  `ONGOINGAI_STORAGE_DRIVER`, `ONGOINGAI_STORAGE_PATH`,
+  `ONGOINGAI_STORAGE_DSN`.
+- Upgrade safety:
+  back up storage before binary upgrades or driver changes.
+
+## Example workflows
+
+### Run with SQLite and verify migration records
+
+1. Validate config and start the gateway in Terminal A.
+
+   ```bash filename="Terminal A"
+   ongoingai config validate
+   ongoingai serve
+   ```
+
+2. Query migration records in Terminal B.
+
+   ```bash filename="Terminal B"
+   sqlite3 ./data/ongoingai.db "SELECT name, applied_at FROM schema_migrations ORDER BY name;"
+   ```
+
+### Switch from SQLite to Postgres
+
+1. Back up your SQLite file.
+
+   ```bash filename="Terminal"
+   mkdir -p ./backup
+   cp ./data/ongoingai.db ./backup/ongoingai-YYYYMMDD.db
+   ```
+
+2. Update `ongoingai.yaml` to use Postgres storage.
+
+   ```yaml filename="ongoingai.yaml"
+   storage:
+     driver: postgres
+     dsn: postgres://USER:PASSWORD@HOST:5432/DB?sslmode=disable
+   ```
+
+3. Validate and start the gateway in Terminal A.
+
+   ```bash filename="Terminal A"
+   ongoingai config validate
+   ongoingai serve
+   ```
+
+4. Confirm migration records in Postgres from Terminal B.
+
+   ```bash filename="Terminal B"
+   psql "POSTGRES_DSN" -c "SELECT name, applied_at FROM schema_migrations ORDER BY name;"
+   ```
+
+Placeholders:
+- `USER`, `PASSWORD`, `HOST`, `DB`: Postgres connection values.
+- `YYYYMMDD`: Backup date label.
+- `POSTGRES_DSN`: Full Postgres DSN.
+
+Switching storage drivers does not copy historical traces automatically.
+If you need historical backfill, export and import trace data separately.
+
+## Validation checklist
+
+1. Validate storage config.
+
+   ```bash filename="Terminal"
+   ongoingai config validate
+   ```
+
+2. Start the gateway in Terminal A.
+
+   ```bash filename="Terminal A"
+   ongoingai serve
+   ```
+
+3. Check health metadata from Terminal B.
+
+   ```bash filename="Terminal B"
+   curl "http://localhost:8080/api/health"
+   ```
+
+4. Check migration tracking.
+
+   If you use SQLite:
+
+   ```bash filename="Terminal B"
+   sqlite3 ./data/ongoingai.db "SELECT COUNT(*) FROM schema_migrations;"
+   ```
+
+   If you use Postgres:
+
+   ```bash filename="Terminal B"
+   psql "POSTGRES_DSN" -c "SELECT COUNT(*) FROM schema_migrations;"
+   ```
+
+You should see:
+- `storage_driver` set to your configured backend.
+- `db_size_bytes` in health response when `storage_driver=sqlite`.
+- At least one row in `schema_migrations`.
+
+## Troubleshooting
+
+### `config validate` fails for storage fields
+
+- Symptom: Validation reports storage field errors.
+- Cause: Invalid `storage.driver`, missing `storage.path`, or missing
+  `storage.dsn`.
+- Fix: Set `storage.driver` to `sqlite` or `postgres`, then provide required
+  fields.
+
+### Gateway fails to initialize Postgres storage
+
+- Symptom: Startup exits with `failed to initialize postgres storage`.
+- Cause: DSN is invalid, Postgres is unreachable, or auth/SSL settings are
+  wrong.
+- Fix: Verify DSN, network reachability, and DB credentials, then restart.
+
+### Gateway fails during schema setup
+
+- Symptom: Startup exits with a schema or migration error.
+- Cause: Migration SQL failed, or DB user lacks required schema permissions.
+- Fix: Verify DB privileges for DDL, inspect the reported error, and restart
+  after fixing the database state.
+
+### Logs show dropped traces during persistence
+
+- Symptom: Logs include `trace persistence failed; dropped trace records`.
+- Cause: Storage writes are failing after startup, often from connectivity or
+  lock contention.
+- Fix: Restore storage health, reduce load if needed, and monitor for repeated
+  failures.
+
+### SQLite writes fail with lock errors
+
+- Symptom: Trace writes fail with `database is locked` or `sqlite_busy`.
+- Cause: Another process or long-running transaction holds SQLite write locks.
+- Fix: Use a single gateway writer process for the file, avoid external writes,
+  or move to Postgres for higher write concurrency.
+
+## Next steps
+
+- [Upgrade and compatibility](/gateway/get-started/upgrade-and-compatibility)
+- [Tracing and audit logs](/gateway/capabilities/tracing-and-audit-logs)
+- [Config reference](/gateway/reference/config-reference)

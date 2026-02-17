@@ -1,0 +1,69 @@
+---
+title: Capabilities
+description: Explore gateway capabilities for auth, tracing, analytics, routing, limits, storage, and reliability.
+related:
+  title: Next steps
+  description: Move from capability overview to architecture and operational reference.
+  links:
+    - gateway/core-concepts/index
+    - gateway/reference/config-reference
+    - gateway/help/troubleshooting
+---
+
+Use this section to understand what OngoingAI Gateway can enforce and observe in
+production traffic.
+You can use these pages to plan rollout order, configuration, and verification.
+
+## Use this section when
+
+- You are planning a production gateway deployment.
+- You need to map controls to security, reliability, and cost goals.
+- You want a page-by-page path from capability overview to implementation.
+
+## Read in this order
+
+1. [Gateway auth, RBAC, and key lifecycle](/gateway/capabilities/gateway-auth-rbac-and-key-lifecycle)
+   for tenant access control.
+2. [Routing and provider support](/gateway/capabilities/routing-and-provider-support)
+   for upstream path and provider behavior.
+3. [Tracing and audit logs](/gateway/capabilities/tracing-and-audit-logs) for
+   request visibility and audit events.
+4. [Analytics, cost, and token accounting](/gateway/capabilities/analytics-cost-and-token-accounting)
+   for usage and spend reporting.
+5. [Rate limiting and quotas](/gateway/capabilities/rate-limiting-and-quotas)
+   for guardrails and abuse control.
+6. [Storage backends and migrations](/gateway/capabilities/storage-backends-and-migrations)
+   for runtime persistence and upgrade safety.
+7. [Streaming and reliability](/gateway/capabilities/streaming-and-reliability)
+   for low-latency stream behavior and failure semantics.
+8. [Privacy and sensitive data handling](/gateway/capabilities/privacy-and-sensitive-data-handling)
+   for redaction and payload-risk controls.
+9. [Integrations and exporters](/gateway/capabilities/integrations-and-exporters)
+   for integration planning.
+
+## Available capability areas
+
+- Gateway authentication and authorization enforcement.
+- Provider routing across OpenAI-compatible and Anthropic paths.
+- Trace capture, audit events, and analytics endpoints.
+- Request limits and daily usage quotas.
+- SQLite and Postgres storage with startup migration behavior.
+- Streaming pass-through with async trace-write isolation.
+
+## Expanding capability areas
+
+- Privacy and sensitive-data handling policy depth.
+- External integrations and exporter surfaces.
+
+## What you should understand after reading
+
+- Which controls enforce access and tenant boundaries.
+- Which controls affect latency and streaming behavior.
+- Which controls govern storage, migrations, and operational risk.
+- Which capability pages are implementation-ready versus planning-oriented.
+
+## Next steps
+
+- [Review core architecture first](/gateway/core-concepts/index)
+- [Review configuration schema and defaults](/gateway/reference/config-reference)
+- [Review troubleshooting paths](/gateway/help/troubleshooting)

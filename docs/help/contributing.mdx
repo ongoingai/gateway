@@ -1,0 +1,157 @@
+---
+title: Contributing
+description: Set up local development, run required checks, and submit high-quality pull requests for OngoingAI Gateway.
+related:
+  title: Next steps
+  description: Continue with security expectations, release notes, and architecture references.
+  links:
+    - gateway/help/security
+    - gateway/help/changelog-and-release-notes
+    - gateway/reference/index
+---
+
+Use this page to contribute code and docs with repository standards.
+It covers local setup, required checks, and pull-request expectations.
+
+## Use this guide when
+
+- You are preparing your first pull request to OngoingAI Gateway.
+- You are changing behavior in auth, proxy, trace, limits, or config code.
+- You are updating product docs under `docs/`.
+
+## Prerequisites
+
+- Go `1.24` (from `go.mod`)
+- `git` and `make`
+- Optional: local Postgres for Postgres-backed integration tests
+
+## Set up your local environment
+
+1. Clone the repository and open the project directory.
+
+   ```bash filename="Terminal"
+   git clone https://github.com/ongoingai/gateway.git
+   cd gateway
+   ```
+
+2. Build the gateway binary.
+
+   ```bash filename="Terminal"
+   make build
+   ```
+
+3. Run the full test suite baseline.
+
+   ```bash filename="Terminal"
+   make test
+   ```
+
+4. Run the gateway locally with default config.
+
+   ```bash filename="Terminal"
+   make run
+   ```
+
+You should see startup logs with server address and configured providers.
+
+## Build and test workflow before a pull request
+
+1. Create a feature branch from `main`.
+
+   ```bash filename="Terminal"
+   git checkout main
+   git pull
+   git checkout -b BRANCH_NAME
+   ```
+
+2. Implement your change and update or add tests.
+3. Format Go files.
+
+   ```bash filename="Terminal"
+   make fmt
+   ```
+
+4. Run focused tests for changed areas first.
+
+   ```bash filename="Terminal"
+   go test ./internal/auth/
+   ```
+
+5. Run full and race checks before opening your pull request.
+
+   ```bash filename="Terminal"
+   make test
+   go test -race ./...
+   ```
+
+Placeholder:
+- `BRANCH_NAME`: Short branch name for your change, for example
+  `auth-deny-unmapped-routes`.
+
+## Documentation contribution standards
+
+If behavior changes, docs must change in the same pull request.
+
+Requirements:
+- Product docs live under `docs/` and must use `.mdx`.
+- Every page must include `title` and `description` frontmatter.
+- Writing must follow the
+  [Google developer documentation style guide](https://developers.google.com/style).
+- Code and command examples should be copy/paste ready.
+
+Frontmatter template:
+
+```yaml filename="docs page frontmatter"
+---
+title: Page title
+description: One to two sentence page summary.
+---
+```
+
+If your editor does not preview `.mdx` files by default:
+
+```json filename="VS Code settings.json"
+{
+  "files.associations": {
+    "*.mdx": "markdown"
+  }
+}
+```
+
+## Pull-request checklist
+
+- Scope is clear and focused to one concern when possible.
+- Security-sensitive paths remain fail-closed.
+- Tenant boundaries (`org_id`, `workspace_id`) remain enforced.
+- No secrets or raw API keys are logged or persisted.
+- Behavior changes include tests.
+- Docs and config examples are updated when behavior changes.
+- CI checks pass.
+
+## Common issues
+
+### Tests fail only in Postgres-backed packages
+
+- Symptom: Postgres integration tests fail or cannot connect.
+- Cause: Missing or invalid `ONGOINGAI_TEST_POSTGRES_DSN`.
+- Fix: Set a reachable Postgres DSN and rerun targeted tests:
+  `go test ./internal/configstore ./internal/trace`.
+
+### Docs page preview looks unformatted in editor
+
+- Symptom: `.mdx` content does not render as markdown preview.
+- Cause: Editor does not map `.mdx` to markdown preview mode.
+- Fix: Add the `files.associations` setting shown above.
+
+### Pull request lacks required behavior coverage
+
+- Symptom: Review requests more tests or docs updates.
+- Cause: Behavior changed without corresponding tests or documentation.
+- Fix: Add regression tests and update affected docs in the same pull
+  request.
+
+## Next steps
+
+- [Security](/gateway/help/security)
+- [Changelog and release notes](/gateway/help/changelog-and-release-notes)
+- [Reference index](/gateway/reference/index)

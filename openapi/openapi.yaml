@@ -1,0 +1,811 @@
+openapi: 3.0.3
+info:
+  title: OngoingAI Gateway API
+  version: 0.1.0
+  description: |
+    HTTP API exposed by the OngoingAI Gateway process.
+    Provider proxy routes (`/openai/*`, `/anthropic/*`) are pass-through and are
+    intentionally not fully modeled in this schema.
+servers:
+  - url: http://localhost:8080
+paths:
+  /:
+    get:
+      summary: Root service metadata
+      responses:
+        '200':
+          description: Service status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RootStatus'
+  /api/health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: Health status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /api/traces:
+    get:
+      summary: List traces
+      security:
+        - GatewayKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/TraceGroupID'
+        - $ref: '#/components/parameters/ThreadID'
+        - $ref: '#/components/parameters/RunID'
+        - in: query
+          name: provider
+          schema:
+            type: string
+        - in: query
+          name: model
+          schema:
+            type: string
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 200
+        - in: query
+          name: cursor
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Trace page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TracesResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+  /api/traces/{id}:
+    get:
+      summary: Get trace detail
+      security:
+        - GatewayKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Trace detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TraceDetail'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+  /api/traces/{id}/replay:
+    get:
+      summary: Replay trace checkpoints
+      security:
+        - GatewayKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - $ref: '#/components/parameters/CheckpointID'
+        - $ref: '#/components/parameters/ThreadID'
+        - $ref: '#/components/parameters/RunID'
+        - $ref: '#/components/parameters/ReplayLimit'
+      responses:
+        '200':
+          description: Replay checkpoint history and target state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TraceReplayResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+  /api/traces/{id}/fork:
+    post:
+      summary: Create fork lineage headers for debug replay
+      security:
+        - GatewayKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TraceForkRequest'
+      responses:
+        '200':
+          description: Fork lineage headers
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TraceForkResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+  /api/analytics/usage:
+    get:
+      summary: Usage summary or series
+      security:
+        - GatewayKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Provider'
+        - $ref: '#/components/parameters/Model'
+        - $ref: '#/components/parameters/GroupBy'
+        - $ref: '#/components/parameters/Bucket'
+      responses:
+        '200':
+          description: Usage summary or series
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/UsageSummary'
+                  - $ref: '#/components/schemas/UsageSeriesResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+  /api/analytics/cost:
+    get:
+      summary: Cost summary or series
+      security:
+        - GatewayKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Provider'
+        - $ref: '#/components/parameters/Model'
+        - $ref: '#/components/parameters/GroupBy'
+        - $ref: '#/components/parameters/Bucket'
+      responses:
+        '200':
+          description: Cost summary or series
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/CostSummary'
+                  - $ref: '#/components/schemas/CostSeriesResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+  /api/analytics/models:
+    get:
+      summary: Model statistics
+      security:
+        - GatewayKeyAuth: []
+      responses:
+        '200':
+          description: Model stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ModelsResponse'
+  /api/analytics/keys:
+    get:
+      summary: API key statistics
+      security:
+        - GatewayKeyAuth: []
+      responses:
+        '200':
+          description: Key stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KeysResponse'
+  /api/analytics/summary:
+    get:
+      summary: Analytics summary
+      security:
+        - GatewayKeyAuth: []
+      responses:
+        '200':
+          description: Analytics summary
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SummaryResponse'
+  /api/gateway-keys:
+    get:
+      summary: List gateway keys
+      security:
+        - GatewayKeyAuth: []
+      responses:
+        '200':
+          description: Gateway key list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayKeysResponse'
+    post:
+      summary: Create gateway key
+      security:
+        - GatewayKeyAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGatewayKeyRequest'
+      responses:
+        '201':
+          description: Gateway key with newly issued token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayKeySecret'
+        '409':
+          $ref: '#/components/responses/ErrorResponse'
+  /api/gateway-keys/{id}:
+    delete:
+      summary: Revoke gateway key
+      security:
+        - GatewayKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Revoked
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+  /api/gateway-keys/{id}/rotate:
+    post:
+      summary: Rotate gateway key token
+      security:
+        - GatewayKeyAuth: []
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RotateGatewayKeyRequest'
+      responses:
+        '200':
+          description: Rotated key with new token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GatewayKeySecret'
+        '404':
+          $ref: '#/components/responses/ErrorResponse'
+components:
+  securitySchemes:
+    GatewayKeyAuth:
+      type: apiKey
+      in: header
+      name: X-OngoingAI-Gateway-Key
+      description: >
+        Required on protected gateway routes when auth.enabled=true. Health and
+        root status routes remain public.
+  parameters:
+    From:
+      in: query
+      name: from
+      schema:
+        type: string
+        format: date-time
+    To:
+      in: query
+      name: to
+      schema:
+        type: string
+        format: date-time
+    Provider:
+      in: query
+      name: provider
+      schema:
+        type: string
+    Model:
+      in: query
+      name: model
+      schema:
+        type: string
+    TraceGroupID:
+      in: query
+      name: trace_group_id
+      schema:
+        type: string
+    ThreadID:
+      in: query
+      name: thread_id
+      schema:
+        type: string
+    RunID:
+      in: query
+      name: run_id
+      schema:
+        type: string
+    CheckpointID:
+      in: query
+      name: checkpoint_id
+      schema:
+        type: string
+    ReplayLimit:
+      in: query
+      name: limit
+      schema:
+        type: integer
+        minimum: 0
+        maximum: 500
+    GroupBy:
+      in: query
+      name: group_by
+      schema:
+        type: string
+        enum: [provider, model]
+    Bucket:
+      in: query
+      name: bucket
+      schema:
+        type: string
+        enum: [hour, day, week]
+  responses:
+    ErrorResponse:
+      description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+  schemas:
+    RootStatus:
+      type: object
+      properties:
+        name:
+          type: string
+        version:
+          type: string
+        status:
+          type: string
+      required: [name, version, status]
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        version:
+          type: string
+        uptime_sec:
+          type: integer
+          format: int64
+        storage_driver:
+          type: string
+        trace_count:
+          type: integer
+          format: int64
+        db_size_bytes:
+          type: integer
+          format: int64
+      required: [status, version, uptime_sec, storage_driver, trace_count]
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+    TraceSummary:
+      type: object
+      properties:
+        id:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        provider:
+          type: string
+        model:
+          type: string
+        request_method:
+          type: string
+        request_path:
+          type: string
+        response_status:
+          type: integer
+        input_tokens:
+          type: integer
+        output_tokens:
+          type: integer
+        total_tokens:
+          type: integer
+        latency_ms:
+          type: integer
+          format: int64
+        time_to_first_token_ms:
+          type: integer
+          format: int64
+        time_to_first_token_us:
+          type: integer
+          format: int64
+        api_key_hash:
+          type: string
+        estimated_cost_usd:
+          type: number
+          format: double
+        created_at:
+          type: string
+          format: date-time
+      required: [id, timestamp, provider, model, request_method, request_path, response_status, input_tokens, output_tokens, total_tokens, latency_ms, time_to_first_token_ms, time_to_first_token_us, estimated_cost_usd, created_at]
+    TracesResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TraceSummary'
+        next_cursor:
+          type: string
+      required: [items]
+    TraceDetail:
+      allOf:
+        - $ref: '#/components/schemas/TraceSummary'
+        - type: object
+          properties:
+            trace_group_id:
+              type: string
+            request_headers:
+              type: object
+              additionalProperties: true
+            request_body:
+              type: string
+            response_headers:
+              type: object
+              additionalProperties: true
+            response_body:
+              type: string
+            lineage:
+              $ref: '#/components/schemas/TraceLineage'
+            metadata:
+              type: object
+              additionalProperties: true
+    TraceLineage:
+      type: object
+      properties:
+        group_id:
+          type: string
+        thread_id:
+          type: string
+        run_id:
+          type: string
+        checkpoint_id:
+          type: string
+        parent_checkpoint_id:
+          type: string
+        checkpoint_seq:
+          type: integer
+          format: int64
+        immutable:
+          type: boolean
+    TraceReplayCheckpoint:
+      type: object
+      properties:
+        id:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+        provider:
+          type: string
+        model:
+          type: string
+        request_method:
+          type: string
+        request_path:
+          type: string
+        response_status:
+          type: integer
+        total_tokens:
+          type: integer
+        latency_ms:
+          type: integer
+          format: int64
+        created_at:
+          type: string
+          format: date-time
+        lineage:
+          $ref: '#/components/schemas/TraceLineage'
+      required: [id, timestamp, provider, model, request_method, request_path, response_status, total_tokens, latency_ms, created_at]
+    TraceReplayResponse:
+      type: object
+      properties:
+        source_trace_id:
+          type: string
+        target_checkpoint_id:
+          type: string
+        lineage:
+          $ref: '#/components/schemas/TraceLineage'
+        checkpoints:
+          type: array
+          items:
+            $ref: '#/components/schemas/TraceReplayCheckpoint'
+        truncated:
+          type: boolean
+        target_trace:
+          $ref: '#/components/schemas/TraceDetail'
+      required: [source_trace_id, target_checkpoint_id, checkpoints, truncated, target_trace]
+    TraceForkRequest:
+      type: object
+      properties:
+        checkpoint_id:
+          type: string
+        thread_id:
+          type: string
+        run_id:
+          type: string
+    TraceForkLineage:
+      type: object
+      properties:
+        group_id:
+          type: string
+        thread_id:
+          type: string
+        run_id:
+          type: string
+        parent_checkpoint_id:
+          type: string
+        checkpoint_seq:
+          type: integer
+          format: int64
+      required: [group_id, thread_id, run_id, parent_checkpoint_id, checkpoint_seq]
+    TraceForkResponse:
+      type: object
+      properties:
+        fork_id:
+          type: string
+        source_trace_id:
+          type: string
+        source_checkpoint_id:
+          type: string
+        lineage:
+          $ref: '#/components/schemas/TraceForkLineage'
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+      required: [fork_id, source_trace_id, source_checkpoint_id, lineage, headers]
+    UsageSummary:
+      type: object
+      properties:
+        total_input_tokens:
+          type: integer
+          format: int64
+        total_output_tokens:
+          type: integer
+          format: int64
+        total_tokens:
+          type: integer
+          format: int64
+      required: [total_input_tokens, total_output_tokens, total_tokens]
+    CostSummary:
+      type: object
+      properties:
+        total_cost_usd:
+          type: number
+          format: double
+      required: [total_cost_usd]
+    UsageSeriesPoint:
+      type: object
+      properties:
+        bucket_start:
+          type: string
+          format: date-time
+        group:
+          type: string
+        input_tokens:
+          type: integer
+          format: int64
+        output_tokens:
+          type: integer
+          format: int64
+        total_tokens:
+          type: integer
+          format: int64
+      required: [bucket_start, input_tokens, output_tokens, total_tokens]
+    UsageSeriesResponse:
+      type: object
+      properties:
+        group_by:
+          type: string
+        bucket:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/UsageSeriesPoint'
+      required: [bucket, items]
+    CostSeriesPoint:
+      type: object
+      properties:
+        bucket_start:
+          type: string
+          format: date-time
+        group:
+          type: string
+        total_cost_usd:
+          type: number
+          format: double
+      required: [bucket_start, total_cost_usd]
+    CostSeriesResponse:
+      type: object
+      properties:
+        group_by:
+          type: string
+        bucket:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/CostSeriesPoint'
+      required: [bucket, items]
+    ModelStats:
+      type: object
+      properties:
+        model:
+          type: string
+        request_count:
+          type: integer
+          format: int64
+        avg_latency_ms:
+          type: number
+          format: double
+        avg_ttft_ms:
+          type: number
+          format: double
+        total_tokens:
+          type: integer
+          format: int64
+        total_cost_usd:
+          type: number
+          format: double
+      required: [model, request_count, avg_latency_ms, avg_ttft_ms, total_tokens, total_cost_usd]
+    ModelsResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ModelStats'
+      required: [items]
+    KeyStats:
+      type: object
+      properties:
+        api_key_hash:
+          type: string
+        request_count:
+          type: integer
+          format: int64
+        total_tokens:
+          type: integer
+          format: int64
+        total_cost_usd:
+          type: number
+          format: double
+        last_active_at:
+          type: string
+          format: date-time
+      required: [api_key_hash, request_count, total_tokens, total_cost_usd]
+    KeysResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/KeyStats'
+      required: [items]
+    SummaryResponse:
+      type: object
+      properties:
+        total_requests:
+          type: integer
+          format: int64
+        total_input_tokens:
+          type: integer
+          format: int64
+        total_output_tokens:
+          type: integer
+          format: int64
+        total_tokens:
+          type: integer
+          format: int64
+        total_cost_usd:
+          type: number
+          format: double
+        active_keys:
+          type: integer
+        top_model:
+          type: string
+      required: [total_requests, total_input_tokens, total_output_tokens, total_tokens, total_cost_usd, active_keys]
+    GatewayKey:
+      type: object
+      properties:
+        id:
+          type: string
+        org_id:
+          type: string
+        workspace_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        created_by:
+          type: string
+        last_used_at:
+          type: string
+          format: date-time
+        role:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+      required: [id, org_id, workspace_id]
+    GatewayKeySecret:
+      allOf:
+        - $ref: '#/components/schemas/GatewayKey'
+        - type: object
+          properties:
+            token:
+              type: string
+          required: [token]
+    GatewayKeysResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/GatewayKey'
+      required: [items]
+    CreateGatewayKeyRequest:
+      type: object
+      properties:
+        id:
+          type: string
+        token:
+          type: string
+        org_id:
+          type: string
+        workspace_id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        role:
+          type: string
+        permissions:
+          type: array
+          items:
+            type: string
+    RotateGatewayKeyRequest:
+      type: object
+      properties:
+        token:
+          type: string

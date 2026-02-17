@@ -1,0 +1,218 @@
+---
+title: Authorization reference
+description: Enforce gateway key permissions by route with workspace-scoped access control and fail-closed behavior.
+related:
+  title: Next steps
+  description: Continue with auth setup, API routes, and tenancy concepts.
+  links:
+    - gateway/capabilities/gateway-auth-rbac-and-key-lifecycle
+    - gateway/reference/rest-api-reference
+    - gateway/core-concepts/keys-workspaces-and-tenancy
+---
+
+Use this page to understand exactly how gateway authorization decisions are made.
+It documents permissions, route policy mapping, and deny behavior.
+
+## Policy scope
+
+- Authorization is machine-to-machine and key-based.
+- Policy applies to proxy routes and protected `/api/...` routes.
+- Health route is public by policy.
+- Unmapped actions on protected prefixes are denied.
+
+Canonical policy source:
+- `AUTHORIZATION.md`
+- `internal/auth/auth.go` (`AuthorizationMatrix()` and middleware logic)
+
+## Required config fields
+
+- `auth.enabled`: enables gateway key authorization when `true`.
+- `auth.header`: gateway key header name.
+- `auth.keys`: static keys, unless Postgres-backed key resolution is used.
+
+Default header:
+- `X-OngoingAI-Gateway-Key`
+
+## Permissions
+
+| Permission | Meaning |
+| --- | --- |
+| `proxy:write` | Send requests through provider proxy routes (`/openai/*`, `/anthropic/*`). |
+| `analytics:read` | Read traces and analytics APIs. |
+| `keys:manage` | List, create, rotate, and revoke gateway keys. |
+
+## Role defaults
+
+| Role | Default permissions |
+| --- | --- |
+| `owner` | `proxy:write`, `analytics:read`, `keys:manage` |
+| `admin` | `proxy:write`, `analytics:read`, `keys:manage` |
+| `developer` | `proxy:write`, `analytics:read` |
+| `member` | `proxy:write`, `analytics:read` |
+| `viewer` | `analytics:read` |
+
+Unknown roles receive no implicit permissions.
+Explicit `permissions` values on a key are additive.
+
+## Route-to-permission matrix
+
+| Resource | Action | Scope | Methods | Routes | Required permission |
+| --- | --- | --- | --- | --- | --- |
+| `health` | `read` | `public` | `GET`, `HEAD` | `/api/health` | none |
+| `traces` | `read` | `workspace` | `GET`, `HEAD` | `/api/traces`, `/api/traces/:id` | `analytics:read` |
+| `analytics` | `read` | `workspace` | `GET`, `HEAD` | `/api/analytics/*` | `analytics:read` |
+| `gateway_keys` | `manage` | `workspace` | `GET`, `POST`, `DELETE` | `/api/gateway-keys*` | `keys:manage` |
+| `proxy` | `forward` | `workspace` | `*` | `/openai/*`, `/anthropic/*` | `proxy:write` |
+
+## Authorization decision rules
+
+1. Middleware resolves required access from request method and path.
+2. `OPTIONS` preflight on protected prefixes is bypassed.
+3. If route is protected, middleware authenticates gateway key from
+   `auth.header`.
+4. Middleware checks required permission for the resolved route.
+5. On proxy routes, middleware also requires provider credentials from client
+   request:
+   `Authorization` or `X-API-Key`.
+6. Middleware strips the gateway key header before upstream forwarding.
+7. If route is under protected prefixes but has no explicit policy mapping,
+   middleware denies with `403`.
+
+## Identity and tenant scope
+
+Resolved identity fields:
+- `key_id`
+- `org_id`
+- `workspace_id`
+- `role`
+
+Default fallback scope:
+- Missing `org_id` resolves to `default`.
+- Missing `workspace_id` resolves to `default`.
+
+Backward-compatible alias:
+- `team` can supply workspace scope when `workspace_id` is empty.
+
+Tenant scoping effect:
+- Trace and analytics reads are filtered to identity workspace scope.
+- Gateway key management routes apply identity workspace scope filters.
+
+## Key source behavior
+
+- `storage.driver=sqlite`:
+  auth keys come from `auth.keys`.
+- `storage.driver=postgres` and `auth.enabled=true`:
+  gateway keys are loaded from Postgres config store.
+- Postgres fallback:
+  if store has zero active keys, gateway falls back to YAML `auth.keys`.
+
+## Error semantics
+
+| Status | Error message | Typical cause |
+| --- | --- | --- |
+| `401` | `missing or invalid gateway key` | Missing key header or unknown key token. |
+| `403` | `gateway key does not have required permission` | Key lacks required permission for route. |
+| `403` | `missing provider API key — pass your provider key via Authorization or X-API-Key header` | Proxy request missing provider credential. |
+| `403` | `request is not authorized by gateway policy` | Protected route/method is unmapped (deny-by-default). |
+| `429` | `gateway usage limit exceeded` or policy-specific message | Proxy limit policy rejected request. |
+| `503` | `gateway key verification unavailable` | Dynamic authorizer unavailable or stale fail-closed path. |
+| `503` | `gateway usage limit check unavailable` | Proxy limit backend unavailable. |
+
+Notes:
+- Gateway key must be sent in configured gateway header.
+- Sending the gateway key only in `Authorization` is not accepted.
+
+## Audit deny fields
+
+On deny outcomes, middleware emits an audit event with:
+- `audit_action` (`gateway_auth`)
+- `audit_outcome` (`deny`)
+- `audit_reason`
+- `status_code`
+- `path`
+- `audit_resource`
+- `audit_resource_action`
+- `audit_scope`
+- `provider`
+- `required_permission`
+- `key_id`, `org_id`, `workspace_id` when identity is known
+- `limit_code` for limit rejects
+
+## Verification workflow
+
+1. Enable auth and start gateway:
+
+   ```bash filename="Terminal"
+   ongoingai config validate --config ongoingai.yaml
+   ongoingai serve --config ongoingai.yaml
+   ```
+
+2. Verify public route access without key:
+
+   ```bash filename="Terminal"
+   curl -i "http://localhost:8080/api/health"
+   ```
+
+3. Verify protected route rejects missing key:
+
+   ```bash filename="Terminal"
+   curl -i "http://localhost:8080/api/traces?limit=1"
+   ```
+
+4. Verify viewer cannot proxy:
+
+   ```bash filename="Terminal"
+   curl -i "http://localhost:8080/openai/v1/models" \
+     -H "X-OngoingAI-Gateway-Key: VIEWER_KEY" \
+     -H "Authorization: Bearer OPENAI_API_KEY"
+   ```
+
+5. Verify key manager can list gateway keys:
+
+   ```bash filename="Terminal"
+   curl -i "http://localhost:8080/api/gateway-keys" \
+     -H "X-OngoingAI-Gateway-Key: MANAGER_KEY"
+   ```
+
+Placeholders:
+- `VIEWER_KEY`: Gateway key token with `analytics:read` only.
+- `MANAGER_KEY`: Gateway key token with `keys:manage`.
+- `OPENAI_API_KEY`: Upstream provider API key.
+
+You should see:
+- `200` for `/api/health` without a key.
+- `401` for protected route without key.
+- `403` for viewer proxy attempt.
+- `200` for gateway-key list with manager key.
+
+## Troubleshooting
+
+### Protected routes return `401`
+
+- Symptom: Response says `missing or invalid gateway key`.
+- Cause: Missing key header, wrong header name, or invalid key token.
+- Fix: Send gateway key in configured `auth.header`.
+
+### Viewer key cannot proxy provider routes
+
+- Symptom: Proxy request returns `403`.
+- Cause: Viewer role does not include `proxy:write`.
+- Fix: Use a key with `proxy:write` permission.
+
+### Proxy returns `403` for missing provider key
+
+- Symptom: Error says provider API key is missing.
+- Cause: Gateway key is valid, but provider credential is absent.
+- Fix: Send `Authorization` or `X-API-Key` with provider token.
+
+### Protected routes return `503`
+
+- Symptom: Error says gateway key verification is unavailable.
+- Cause: In Postgres mode, authorizer refresh failed or cache is stale.
+- Fix: Restore config-store connectivity and verify key refresh logs.
+
+## Next steps
+
+- [Gateway auth, RBAC, and key lifecycle](/gateway/capabilities/gateway-auth-rbac-and-key-lifecycle)
+- [REST API reference](/gateway/reference/rest-api-reference)
+- [Keys, workspaces, and tenancy](/gateway/core-concepts/keys-workspaces-and-tenancy)

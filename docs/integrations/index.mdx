@@ -1,0 +1,41 @@
+---
+title: Integrations
+description: Connect OngoingAI Gateway telemetry to external observability and analytics systems.
+related:
+  title: Next steps
+  description: Continue with specific integration guides.
+  links:
+    - gateway/integrations/opentelemetry
+    - gateway/capabilities/integrations-and-exporters
+    - gateway/capabilities/tracing-and-audit-logs
+---
+
+Use this section to connect OngoingAI Gateway to external observability
+platforms, collectors, and analytics pipelines.
+
+## Available integrations
+
+- **OpenTelemetry**: Export distributed traces and gateway metrics to any
+  OTLP-compatible collector. Covers request spans, upstream proxy spans,
+  tenant-scoped attributes, and operational metrics.
+
+## Integration model
+
+The gateway supports two complementary integration paths:
+
+- **Push-based (OpenTelemetry)**: The gateway pushes traces and metrics to an
+  OTLP collector over HTTP. You configure the collector endpoint and the gateway
+  exports automatically.
+- **Pull-based (JSON APIs)**: External systems poll gateway HTTP endpoints for
+  trace records, analytics aggregates, and health status. See
+  [Integrations and exporters](/gateway/capabilities/integrations-and-exporters)
+  for pull-based patterns.
+
+Both paths operate independently. You can use one or both depending on your
+infrastructure.
+
+## Next steps
+
+- [OpenTelemetry integration](/gateway/integrations/opentelemetry)
+- [Pull-based integrations and exporters](/gateway/capabilities/integrations-and-exporters)
+- [Tracing and audit logs](/gateway/capabilities/tracing-and-audit-logs)

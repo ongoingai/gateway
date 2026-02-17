@@ -1,0 +1,168 @@
+---
+title: Quickstart
+description: Start OngoingAI Gateway, route your first provider request, and verify trace capture.
+related:
+  title: Next steps
+  description: Continue from local validation to policy and operations.
+  links:
+    - gateway/get-started/install
+    - gateway/capabilities/gateway-auth-rbac-and-key-lifecycle
+    - gateway/reference/config-reference
+---
+
+Use this guide to validate a local gateway in about five minutes.
+You will start the gateway, proxy one request, and confirm trace capture.
+
+## What you will do
+
+- Start the gateway on `localhost:8080`.
+- Send one provider request through the proxy.
+- Confirm trace and analytics responses from the API.
+
+## Use this quickstart when
+
+- Use this guide when you want a working local setup fast.
+- Use this guide before you configure gateway auth, limits, or Postgres.
+
+## Prerequisites
+
+- You must have at least one provider key:
+  `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`.
+- You must have port `8080` available.
+- You should have `curl` installed.
+
+## Steps
+
+1. Install the CLI.
+
+   ```bash filename="Terminal"
+   curl -sSL https://ongoingai.dev/install.sh | sh
+   ```
+
+   You should be able to run `ongoingai --help`.
+
+2. Start the gateway in Terminal A.
+
+   ```bash filename="Terminal A"
+   ongoingai serve
+   ```
+
+   You should see startup logs with an address similar to
+   `0.0.0.0:8080`.
+
+3. Set provider base URLs in Terminal B.
+
+   ```bash filename="Terminal B"
+   eval "$(ongoingai shell-init)"
+   ```
+
+   You should see these environment variables in your shell:
+   - `OPENAI_BASE_URL=http://localhost:8080/openai/v1`
+   - `ANTHROPIC_BASE_URL=http://localhost:8080/anthropic`
+
+4. Send one request through the gateway from Terminal B.
+
+   If you use OpenAI-compatible traffic, run:
+
+   ```bash filename="Terminal B"
+   curl http://localhost:8080/openai/v1/chat/completions \
+     -H "Authorization: Bearer $OPENAI_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Reply with ok"}]}'
+   ```
+
+   If you use Anthropic traffic, run:
+
+   ```bash filename="Terminal B"
+   curl http://localhost:8080/anthropic/v1/messages \
+     -H "x-api-key: $ANTHROPIC_API_KEY" \
+     -H "anthropic-version: 2023-06-01" \
+     -H "content-type: application/json" \
+     -d '{"model":"claude-sonnet-4-latest","max_tokens":128,"messages":[{"role":"user","content":"Reply with ok"}]}'
+   ```
+
+   You should see a JSON response from the provider.
+
+5. Verify that the gateway captured the request in Terminal B.
+
+   ```bash filename="Terminal B"
+   curl http://localhost:8080/api/health
+   curl "http://localhost:8080/api/traces?limit=1"
+   ```
+
+   You should see:
+   - `status` set to `ok` from `/api/health`
+   - At least one trace item from `/api/traces`
+
+## Examples
+
+### Minimal example
+
+Run one request and fetch one trace:
+
+```bash filename="Terminal B"
+curl http://localhost:8080/openai/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"ping"}]}'
+
+curl "http://localhost:8080/api/traces?limit=1"
+```
+
+### Practical example
+
+Run requests across two providers, then view summary analytics:
+
+```bash filename="Terminal B"
+curl http://localhost:8080/openai/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Summarize this in one line."}]}'
+
+curl http://localhost:8080/anthropic/v1/messages \
+  -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "content-type: application/json" \
+  -d '{"model":"claude-sonnet-4-latest","max_tokens":128,"messages":[{"role":"user","content":"Reply with ok"}]}'
+
+curl "http://localhost:8080/api/analytics/summary"
+```
+
+You should see request, token, and estimated cost totals.
+
+## Troubleshooting
+
+### Gateway does not start
+
+- Symptom: `ongoingai serve` exits with a config or bind error.
+- Cause: Invalid config values or port `8080` is already in use.
+- Fix: Run `ongoingai config validate` and free port `8080` or change
+  `server.port` in `ongoingai.yaml`.
+
+### Proxy request returns `403` for missing provider credentials
+
+- Symptom: The response error says the gateway is missing a provider API key.
+- Cause: The request did not include `Authorization` or `X-API-Key`.
+- Fix: Add the provider key header to the proxied request.
+
+### Proxy request returns `401` for gateway key authentication
+
+- Symptom: The response says `missing or invalid gateway key`.
+- Cause: `auth.enabled=true` and the request does not include a valid gateway
+  key.
+- Fix: Add your configured gateway key header (default:
+  `X-OngoingAI-Gateway-Key`).
+
+### No traces appear in `/api/traces`
+
+- Symptom: `/api/traces` returns an empty list.
+- Cause: The request did not pass through a provider route, or the request failed
+  before provider forwarding.
+- Fix: Send a request to `/openai/...` or `/anthropic/...`, then query
+  `/api/traces?limit=10`.
+
+## Next steps
+
+- [Configure auth and RBAC](/gateway/capabilities/gateway-auth-rbac-and-key-lifecycle)
+- [Configure limits](/gateway/capabilities/rate-limiting-and-quotas)
+- [Review config options](/gateway/reference/config-reference)

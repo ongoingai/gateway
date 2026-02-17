@@ -1,0 +1,60 @@
+---
+title: Architecture
+description: Understand the gateway request path, trace path, and failure boundaries.
+related:
+  title: Next steps
+  description: Continue with trace and tenancy details.
+  links:
+    - gateway/core-concepts/traces-and-audit-model
+    - gateway/core-concepts/keys-workspaces-and-tenancy
+    - gateway/capabilities/streaming-and-reliability
+---
+
+Use this page to understand how OngoingAI Gateway handles proxy traffic and
+trace persistence.
+
+## Use this concept when
+
+- You are planning deployment architecture or rollout order.
+- You need a shared model for platform, security, and application teams.
+- You need to reason about proxy reliability when storage is degraded.
+
+## Request path
+
+1. A client sends traffic to a provider route such as `/openai/...` or
+   `/anthropic/...`.
+2. Auth middleware validates gateway access when `auth.enabled=true`.
+3. Capture middleware records request and response metadata.
+4. Reverse proxy middleware forwards the request to the configured provider
+   upstream.
+5. The gateway strips its own auth header before upstream forwarding.
+6. The provider response streams back through the gateway to the client.
+
+## Trace path
+
+1. Capture middleware builds a trace record from the proxied exchange.
+2. The trace writer enqueues trace records into a bounded async queue.
+3. The trace store persists records to `sqlite` or `postgres`.
+4. API routes read stored traces and aggregates for analytics responses.
+
+## Design properties
+
+- Upstream provider credentials are pass-through and are not persisted as raw
+  key material.
+- Protected routes fail closed for auth and tenant-scope uncertainty.
+- Trace persistence is asynchronous to avoid coupling proxy latency to storage.
+- Streaming responses preserve provider ordering and chunk delivery semantics.
+
+## Failure boundaries
+
+- If auth checks fail, protected routes return `401`, `403`, or `503`.
+- If trace queue capacity is reached, traces can be dropped while proxy
+  forwarding continues.
+- If trace persistence fails, errors are logged and proxy forwarding continues.
+- If config or storage initialization fails at startup, gateway startup exits.
+
+## Next steps
+
+- [Review trace and audit model](/gateway/core-concepts/traces-and-audit-model)
+- [Review keys, workspaces, and tenancy](/gateway/core-concepts/keys-workspaces-and-tenancy)
+- [Review streaming and reliability behavior](/gateway/capabilities/streaming-and-reliability)

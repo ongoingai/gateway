@@ -1,0 +1,88 @@
+---
+title: What is OngoingAI Gateway
+description: Learn what OngoingAI Gateway is, what it does, and where it fits.
+related:
+  title: Next steps
+  description: Move from concept to first traffic and configuration.
+  links:
+    - gateway/get-started/quickstart
+    - gateway/core-concepts/architecture
+    - gateway/reference/config-reference
+---
+
+OngoingAI Gateway is a headless AI gateway that runs between your application
+and AI providers such as OpenAI and Anthropic.
+
+You point existing SDK or CLI traffic at the gateway base URL. The gateway
+forwards requests, returns streaming responses, and records trace metadata for
+audit and cost visibility.
+
+## Quick shape of a deployment
+
+Most teams deploy one gateway per environment and only change client base URLs.
+Application request payloads and SDK calls stay the same.
+
+```bash filename="Environment example"
+export OPENAI_BASE_URL=http://localhost:8080/openai/v1
+export ANTHROPIC_BASE_URL=http://localhost:8080/anthropic
+```
+
+## Typical outcomes
+
+Use OngoingAI Gateway when you need to:
+
+- Attribute AI traffic and cost by gateway key, `org_id`, or `workspace_id`.
+- Apply one access-control layer across providers and models.
+- Investigate production failures with request-level trace records.
+- Keep provider API keys in client requests and out of gateway storage.
+
+## How request handling works
+
+1. Your client sends a provider request to a gateway route such as
+   `/openai/v1/chat/completions` or `/anthropic/v1/messages`.
+2. If gateway auth is enabled, your client also sends
+   `X-OngoingAI-Gateway-Key`.
+3. The gateway validates access, tenant scope, and limits.
+4. The gateway strips its own auth header and forwards the provider credential
+   upstream.
+5. The provider response streams back through the gateway to your client.
+6. The gateway writes trace metadata asynchronously so proxy latency stays
+   predictable.
+
+## What data it records
+
+For each proxied request, the gateway records metadata such as:
+
+- Provider, route, HTTP method, status code, and latency.
+- Model, token usage, and estimated cost when the provider returns usage
+  fields.
+- A hashed provider-key identifier for attribution.
+
+By default, the gateway does not capture request or response bodies. To capture
+payloads for debugging, set `tracing.capture_bodies: true`.
+
+If gateway auth is enabled, each trace is scoped to `org_id` and
+`workspace_id`.
+
+## What it does not do
+
+OngoingAI Gateway intentionally has a narrow scope:
+
+- It does not include a web UI.
+- It does not manage browser sessions or end-user sign-in.
+- It does not replace your application authorization model.
+- It does not persist upstream provider API keys.
+
+## Deployment model
+
+You can run OngoingAI Gateway as a single self-hosted binary.
+
+- Default storage is SQLite for local or single-node deployments.
+- Postgres is available for team and multi-service deployments.
+
+## Next steps
+
+- [Install OngoingAI Gateway](/gateway/get-started/install)
+- [Run the Quickstart](/gateway/get-started/quickstart)
+- [Review architecture details](/gateway/core-concepts/architecture)
+- [See all configuration options](/gateway/reference/config-reference)

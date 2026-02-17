@@ -1,0 +1,48 @@
+---
+title: Core concepts
+description: Learn the core mental model for gateway request flow, traces, privacy, and tenant scope.
+related:
+  title: Next steps
+  description: Move from concepts to enforcement and operations.
+  links:
+    - gateway/capabilities/gateway-auth-rbac-and-key-lifecycle
+    - gateway/capabilities/tracing-and-audit-logs
+    - gateway/reference/config-reference
+---
+
+Use this section to understand how OngoingAI Gateway works before you tune
+configuration or enforce production policy.
+You will learn how request forwarding, trace capture, privacy controls, and
+tenant boundaries fit together.
+
+## Use this section when
+
+- You are designing a gateway deployment or rollout plan.
+- You need a shared architecture model across platform, security, and
+  application teams.
+- You need to reason about privacy and tenant isolation behavior before enabling
+  advanced controls.
+
+## Read in this order
+
+1. [Architecture](/gateway/core-concepts/architecture) for request-path and
+   trace-path fundamentals.
+2. [Traces and audit model](/gateway/core-concepts/traces-and-audit-model) for
+   data model and event boundaries.
+3. [Privacy model](/gateway/core-concepts/privacy-model) for storage and
+   redaction behavior.
+4. [Keys, workspaces, and tenancy](/gateway/core-concepts/keys-workspaces-and-tenancy)
+   for identity scope and isolation rules.
+
+## What you should understand after reading
+
+- Where auth, capture, routing, and storage happen in the request lifecycle.
+- Which trace data is always captured and which data is optional.
+- How privacy controls change persisted trace content.
+- How org and workspace scope is applied to access and analytics.
+
+## Next steps
+
+- [Configure gateway auth and key lifecycle](/gateway/capabilities/gateway-auth-rbac-and-key-lifecycle)
+- [Configure tracing and audit operations](/gateway/capabilities/tracing-and-audit-logs)
+- [Review configuration schema](/gateway/reference/config-reference)

@@ -1,0 +1,178 @@
+---
+title: Routing and provider support
+description: Configure OpenAI and Anthropic route prefixes, customize upstream endpoints, and verify prefix-based proxy forwarding.
+related:
+  title: Next steps
+  description: Continue with auth, tracing, and full configuration details.
+  links:
+    - gateway/capabilities/gateway-auth-rbac-and-key-lifecycle
+    - gateway/capabilities/tracing-and-audit-logs
+    - gateway/reference/config-reference
+---
+
+Use this page to configure provider routing in OngoingAI Gateway.
+It explains prefix matching, upstream forwarding, and validation steps.
+
+## Routing behavior
+
+- Routes traffic by configured OpenAI and Anthropic path prefixes.
+- Forwards matched requests to provider upstream endpoints.
+- Strips the matched route prefix before forwarding upstream.
+- Leaves non-provider routes available for gateway APIs such as `/api/...`.
+- Supports OpenAI-compatible providers through `providers.openai.upstream`.
+
+## Operational fit
+
+- You need one gateway endpoint for multiple provider APIs.
+- You need to swap provider upstreams without changing client request shapes.
+- You need stable base URLs for SDKs and CLI tools across environments.
+
+## Matching and forwarding flow
+
+1. The gateway reads `providers.openai` and `providers.anthropic` from config.
+2. Each configured prefix is normalized for matching.
+3. A request matches only when the path equals the prefix or starts with
+   `<prefix>/`.
+4. The gateway strips the matched prefix from the upstream request path.
+5. If no provider route matches, the request falls through to the non-proxy
+   handler.
+6. If upstream forwarding fails, the gateway returns `502` with
+   `upstream request failed`.
+
+## Starter routing config
+
+```yaml filename="ongoingai.yaml"
+providers:
+  openai:
+    upstream: https://api.openai.com
+    prefix: /openai
+  anthropic:
+    upstream: https://api.anthropic.com
+    prefix: /anthropic
+```
+
+Prefix values must start with `/`. Upstream values must include both scheme and
+host.
+
+## Routing patterns
+
+- Route OpenAI-compatible traffic through a compatible endpoint by setting
+  `providers.openai.upstream`.
+- Use environment-specific upstream hosts with
+  `ONGOINGAI_OPENAI_UPSTREAM` and `ONGOINGAI_ANTHROPIC_UPSTREAM`.
+- Place provider routes under a shared ingress path such as `/ai/openai` and
+  `/ai/anthropic`.
+- Keep provider prefixes distinct so one route does not shadow the other.
+
+## Example route setups
+
+### Route OpenAI-compatible traffic to a custom upstream
+
+```yaml filename="ongoingai.yaml"
+providers:
+  openai:
+    upstream: https://openai-compatible.example.com
+    prefix: /openai
+  anthropic:
+    upstream: https://api.anthropic.com
+    prefix: /anthropic
+```
+
+### Use nested prefixes behind one ingress path
+
+```yaml filename="ongoingai.yaml"
+providers:
+  openai:
+    upstream: https://api.openai.com
+    prefix: /ai/openai
+  anthropic:
+    upstream: https://api.anthropic.com
+    prefix: /ai/anthropic
+```
+
+After you change prefixes, run `eval "$(ongoingai shell-init)"` again so client
+base URLs stay aligned.
+
+## Verification checklist
+
+1. Validate config before restart.
+
+   ```bash filename="Terminal"
+   ongoingai config validate
+   ```
+
+2. Start or restart the gateway.
+
+   ```bash filename="Terminal"
+   ongoingai serve
+   ```
+
+3. Refresh shell base URLs.
+
+   ```bash filename="Terminal"
+   eval "$(ongoingai shell-init)"
+   ```
+
+4. Send one request through each provider route.
+
+   ```bash filename="Terminal"
+   curl http://localhost:8080/openai/v1/chat/completions \
+     -H "Authorization: Bearer $OPENAI_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Reply with ok"}]}'
+
+   curl http://localhost:8080/anthropic/v1/messages \
+     -H "x-api-key: $ANTHROPIC_API_KEY" \
+     -H "anthropic-version: 2023-06-01" \
+     -H "content-type: application/json" \
+     -d '{"model":"claude-sonnet-4-latest","max_tokens":128,"messages":[{"role":"user","content":"Reply with ok"}]}'
+   ```
+
+5. Confirm provider attribution in traces.
+
+   ```bash filename="Terminal"
+   curl "http://localhost:8080/api/traces?limit=5"
+   ```
+
+You should see:
+- Provider responses from both routes.
+- Trace items with `provider` values `openai` and `anthropic`.
+- OpenAI clients using a base URL that ends with `/v1` when routed through the
+  OpenAI prefix.
+
+## Troubleshooting
+
+### Provider route returns `404`
+
+- Symptom: A proxied request returns `404 page not found`.
+- Cause: Request path does not match your configured provider prefix.
+- Fix: Check `providers.*.prefix`, then refresh client base URLs with
+  `eval "$(ongoingai shell-init)"`.
+
+### OpenAI SDK calls fail after prefix changes
+
+- Symptom: OpenAI-compatible SDK requests fail or hit wrong paths.
+- Cause: `OPENAI_BASE_URL` does not match your configured OpenAI prefix.
+- Fix: Regenerate shell variables with `ongoingai shell-init`.
+  Confirm the OpenAI base URL ends with `/v1`.
+
+### Proxy route returns `502 upstream request failed`
+
+- Symptom: Gateway responds with `502` and `upstream request failed`.
+- Cause: Upstream provider endpoint is unavailable or unreachable.
+- Fix: Verify `providers.*.upstream`, DNS and network reachability, and
+  provider service health.
+
+### Config validation fails for provider settings
+
+- Symptom: `ongoingai config validate` reports provider errors.
+- Cause: Prefix is missing a leading `/`, or upstream is missing scheme or
+  host.
+- Fix: Set valid values such as `prefix: /openai` and
+  `upstream: https://api.openai.com`.
+
+## Next steps
+
+- [Quickstart](/gateway/get-started/quickstart)
+- [Config reference](/gateway/reference/config-reference)
+- [Tracing and audit logs](/gateway/capabilities/tracing-and-audit-logs)

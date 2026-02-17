@@ -1,0 +1,53 @@
+---
+title: Reference
+description: Look up config keys, environment variables, CLI commands, API routes, and authorization rules for OngoingAI Gateway.
+related:
+  title: Next steps
+  description: Continue with configuration hardening and operational troubleshooting.
+  links:
+    - gateway/reference/config-reference
+    - gateway/capabilities/index
+    - gateway/help/troubleshooting
+---
+
+Use this section when you need exact names, fields, flags, routes, and
+permission terms.
+You can use these pages as canonical lookup material while operating or
+integrating the gateway.
+
+## Use this reference when
+
+- You need exact config keys, defaults, and validation constraints.
+- You need CLI command syntax for scripts and runbooks.
+- You need API route parameters and response fields for integration code.
+- You need permission requirements for gateway auth decisions.
+
+## Read in this order
+
+1. [Config reference](/gateway/reference/config-reference) for YAML fields,
+   defaults, and validation rules.
+2. [Environment variable reference](/gateway/reference/env-var-reference) for
+   env override names and parse behavior.
+3. [CLI reference](/gateway/reference/cli-reference) for command usage, flags,
+   and exit behavior.
+4. [REST API reference](/gateway/reference/rest-api-reference) for endpoint
+   contracts and request and response shapes.
+5. [Authorization reference](/gateway/reference/authorization-reference) for
+   roles, permissions, and route-to-permission mapping.
+
+## What this section covers
+
+- Configuration schema and operational defaults.
+- Environment variable override behavior.
+- CLI command contracts.
+- API contracts for health, traces, analytics, and gateway key management.
+- Authorization policy vocabulary and enforcement mapping.
+
+If a detail is missing, verify behavior in `openapi/openapi.yaml`,
+`cmd/ongoingai/main.go`, `internal/api/`, and `internal/auth/auth.go`.
+
+## Next steps
+
+- [Review configuration details first](/gateway/reference/config-reference)
+- [Review capability implementation guides](/gateway/capabilities/index)
+- [Review operational troubleshooting](/gateway/help/troubleshooting)

@@ -1,0 +1,181 @@
+---
+title: Integrations and exporters
+description: Integrate gateway telemetry with external systems using pull-based APIs and structured logs.
+related:
+  title: Next steps
+  description: Continue with tracing details, analytics endpoints, and storage planning.
+  links:
+    - gateway/capabilities/tracing-and-audit-logs
+    - gateway/capabilities/analytics-cost-and-token-accounting
+    - gateway/capabilities/storage-backends-and-migrations
+---
+
+Use this page to integrate OngoingAI Gateway data with external dashboards,
+SIEM pipelines, and reporting jobs.
+It covers current export surfaces and practical pull-based integration patterns.
+
+## Export surfaces
+
+- Exposes JSON API endpoints for health, traces, and analytics data.
+- Emits structured JSON logs to stdout for request lifecycle and audit events.
+- Persists trace records to SQLite or Postgres for downstream reporting jobs.
+- Optionally exports gateway spans and metrics with native OpenTelemetry OTLP HTTP.
+- OpenTelemetry spans include gateway tenant identity attributes (`org_id`,
+  `workspace_id`, `key_id`) when auth is enabled.
+- Supports browser-based integration clients with CORS headers on API routes.
+
+## Operational fit
+
+- You need external usage and cost dashboards from gateway trace data.
+- You need centralized audit and auth-deny visibility in your log pipeline.
+- You need export behavior that does not block proxy request forwarding.
+
+## Integration flow
+
+1. Proxy traffic is captured and written asynchronously to trace storage.
+2. API routes under `/api/...` read from storage and return JSON responses.
+3. `/api/traces` supports filtered and cursor-based pull exports.
+4. `/api/analytics/*` exposes usage, cost, model, key, and summary aggregates.
+5. Gateway logs are emitted as JSON lines to stdout and can be shipped by your
+   log collector.
+6. If `auth.enabled=true`, integration readers must use a gateway key with
+   `analytics:read` for trace and analytics APIs.
+7. If `observability.otel.enabled=true`, the gateway emits OTLP HTTP spans and
+   metrics to your configured collector endpoint.
+
+## Starter integration config
+
+No separate integration feature flag is required.
+You can integrate by reading HTTP APIs and shipping stdout logs.
+
+```yaml filename="ongoingai.yaml"
+auth:
+  enabled: true
+  header: X-OngoingAI-Gateway-Key
+storage:
+  driver: sqlite
+  path: ./ongoingai.db
+tracing:
+  capture_bodies: false
+  body_max_size: 1048576
+observability:
+  otel:
+    enabled: true
+    endpoint: localhost:4318
+    insecure: true
+    service_name: ongoingai-gateway
+    traces_enabled: true
+    metrics_enabled: true
+    sampling_ratio: 1.0
+    export_timeout_ms: 3000
+    metric_export_interval_ms: 10000
+```
+
+With `capture_bodies=false`, your integrations still get usage, latency, and
+metadata fields without storing request and response payload bodies.
+
+## Integration patterns
+
+- Dashboard polling:
+  poll `/api/analytics/summary` on a fixed interval.
+- Incremental trace export:
+  use `/api/traces?limit=200` with returned `next_cursor`.
+- SIEM integration:
+  ship JSON stdout logs and index `audit_action`, `audit_outcome`, and `path`.
+- Multi-reader analytics workloads:
+  use Postgres storage for shared query access patterns.
+
+## Example integrations
+
+### Pull summary metrics for a dashboard job
+
+```bash filename="Terminal"
+curl "http://localhost:8080/api/analytics/summary" \
+  -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
+```
+
+Placeholder:
+- `GATEWAY_KEY`: Gateway key token with `analytics:read` permission.
+
+### Export traces incrementally with cursor pagination
+
+```bash filename="Terminal"
+curl "http://localhost:8080/api/traces?limit=200" \
+  -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
+
+curl "http://localhost:8080/api/traces?limit=200&cursor=NEXT_CURSOR" \
+  -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
+```
+
+Placeholder:
+- `NEXT_CURSOR`: Cursor value from the previous `/api/traces` response.
+
+### Filter audit-focused log lines from stdout
+
+```bash filename="Terminal"
+ongoingai serve | jq -c 'select(.audit_action != null)'
+```
+
+This stream includes gateway auth deny and gateway key lifecycle audit events.
+
+## Validation checklist
+
+1. Start the gateway:
+
+   ```bash filename="Terminal"
+   ongoingai config validate
+   ongoingai serve
+   ```
+
+2. Send one proxied provider request through `/openai/...` or `/anthropic/...`.
+3. Query integration APIs:
+
+   ```bash filename="Terminal"
+   curl "http://localhost:8080/api/health"
+   curl "http://localhost:8080/api/traces?limit=1" \
+     -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
+   curl "http://localhost:8080/api/analytics/summary" \
+     -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
+   ```
+
+You should see:
+- JSON responses from all three endpoints.
+- Trace and summary data after proxied traffic.
+- Structured JSON log lines in gateway stdout.
+
+## Troubleshooting
+
+### Integration APIs return `401` or `403`
+
+- Symptom: `/api/traces` or `/api/analytics/*` requests are rejected.
+- Cause: Missing gateway key, or key is missing `analytics:read`.
+- Fix: Use a valid gateway key with `analytics:read`.
+
+### `/api/traces` returns no items
+
+- Symptom: Trace export responses are empty.
+- Cause: No proxied provider requests were captured, or writes are still
+  pending in the async writer queue.
+- Fix: Send provider traffic through gateway routes, then retry after a
+  short delay.
+
+### Log pipeline does not parse gateway output as JSON
+
+- Symptom: Log collector indexes gateway lines as unstructured text.
+- Cause: Collector parser is not configured for newline-delimited JSON.
+- Fix: Configure the collector source as JSON line input for gateway stdout.
+
+### Expected Prometheus or OpenTelemetry exporter endpoint is missing
+
+- Symptom: Requests to `/metrics` or OTLP exporter targets fail.
+- Cause: `/metrics` is not implemented as a native Prometheus scrape endpoint,
+  or OpenTelemetry export is disabled/misconfigured.
+- Fix: For Prometheus, use a collector bridge (OTLP -> Prometheus). For OTEL,
+  set `observability.otel.enabled=true` and verify
+  `observability.otel.endpoint` reachability.
+
+## Next steps
+
+- [Tracing and audit logs](/gateway/capabilities/tracing-and-audit-logs)
+- [Analytics, cost, and token accounting](/gateway/capabilities/analytics-cost-and-token-accounting)
+- [Storage backends and migrations](/gateway/capabilities/storage-backends-and-migrations)

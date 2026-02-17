@@ -1,0 +1,45 @@
+server:
+  host: 0.0.0.0
+  port: 8080
+
+storage:
+  driver: sqlite
+  path: ./data/ongoingai.db
+  # dsn: postgres://user:password@localhost:5432/ongoingai?sslmode=disable
+
+providers:
+  openai:
+    upstream: https://api.openai.com
+    prefix: /openai
+  anthropic:
+    upstream: https://api.anthropic.com
+    prefix: /anthropic
+
+tracing:
+  capture_bodies: false
+  body_max_size: 1048576
+
+observability:
+  otel:
+    enabled: false
+    endpoint: localhost:4318
+    insecure: true
+    service_name: ongoingai-gateway
+    traces_enabled: true
+    metrics_enabled: true
+    sampling_ratio: 1.0
+    export_timeout_ms: 3000
+    metric_export_interval_ms: 10000
+
+auth:
+  enabled: false
+  header: X-OngoingAI-Gateway-Key
+  keys:
+    - id: team-a-dev-1
+      token: replace-me
+      org_id: org-default
+      workspace_id: workspace-default
+      role: developer
+      permissions:
+        - proxy:write
+        - analytics:read

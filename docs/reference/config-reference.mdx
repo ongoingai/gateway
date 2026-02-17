@@ -1,0 +1,431 @@
+---
+title: Config reference
+description: Define ongoingai.yaml with field defaults, validation rules, and production-ready examples.
+related:
+  title: Next steps
+  description: Continue with environment overrides, CLI usage, and authorization policy.
+  links:
+    - gateway/reference/env-var-reference
+    - gateway/reference/cli-reference
+    - gateway/reference/authorization-reference
+---
+
+Use this page to configure OngoingAI Gateway with `ongoingai.yaml`.
+It lists field defaults, validation constraints, and runtime behavior.
+
+## Load order and precedence
+
+1. Gateway starts from built-in defaults.
+2. If the config file exists, YAML values override defaults.
+3. If supported `ONGOINGAI_*` env vars are set, env vars override YAML values.
+
+If the config file path does not exist, startup still works with defaults and
+env overrides.
+
+## Baseline config
+
+```yaml filename="ongoingai.yaml"
+server:
+  host: 0.0.0.0
+  port: 8080
+
+storage:
+  driver: sqlite
+  path: ./data/ongoingai.db
+  dsn: ""
+
+providers:
+  openai:
+    upstream: https://api.openai.com
+    prefix: /openai
+  anthropic:
+    upstream: https://api.anthropic.com
+    prefix: /anthropic
+
+tracing:
+  capture_bodies: false
+  body_max_size: 1048576
+
+observability:
+  otel:
+    enabled: false
+    endpoint: localhost:4318
+    insecure: true
+    service_name: ongoingai-gateway
+    traces_enabled: true
+    metrics_enabled: true
+    sampling_ratio: 1.0
+    export_timeout_ms: 3000
+    metric_export_interval_ms: 10000
+
+pii:
+  mode: ""
+  policy_id: default/v1
+  stages:
+    request_headers: true
+    request_body: true
+    response_headers: true
+    response_body: true
+  detectors:
+    email: true
+    phone: true
+    ssn: true
+    token_like: true
+  headers:
+    denylist:
+      - authorization
+      - cookie
+      - set-cookie
+      - x-api-key
+      - x-ongoingai-gateway-key
+  body:
+    key_denylist:
+      - email
+      - phone
+      - password
+      - token
+      - secret
+      - ssn
+      - api_key
+      - authorization
+  replacement:
+    format: "[{type}_REDACTED:{hash}]"
+    hash_salt: ""
+
+auth:
+  enabled: false
+  header: X-OngoingAI-Gateway-Key
+  keys: []
+
+limits:
+  per_key:
+    requests_per_minute: 0
+    max_tokens_per_day: 0
+    max_cost_usd_per_day: 0
+  per_workspace:
+    requests_per_minute: 0
+    max_tokens_per_day: 0
+    max_cost_usd_per_day: 0
+```
+
+Treat this baseline as a starting point. Most production deployments adjust
+`auth`, `limits`, and storage settings first.
+
+## Top-level configuration areas
+
+- `server`: HTTP bind host and port.
+- `storage`: Trace storage backend selection and connection fields.
+- `providers`: Upstream endpoints and route prefixes.
+- `tracing`: Request and response body capture controls.
+- `observability`: OpenTelemetry exporter and sampling controls.
+- `pii`: Storage redaction policy and detector behavior.
+- `auth`: Gateway authentication header and key configuration.
+- `limits`: Rate and daily usage limits by key and workspace.
+
+## Field reference
+
+### `server`
+
+| Field | Type | Default | Required | Notes |
+| --- | --- | --- | --- | --- |
+| `server.host` | string | `0.0.0.0` | No | HTTP bind host. `shell-init` maps wildcard hosts to `localhost` for generated client URLs. |
+| `server.port` | int | `8080` | No | Must be between `1` and `65535`. |
+
+### `storage`
+
+| Field | Type | Default | Required | Notes |
+| --- | --- | --- | --- | --- |
+| `storage.driver` | string | `sqlite` | No | Supported values: `sqlite`, `postgres`. |
+| `storage.path` | string | `./data/ongoingai.db` | Conditional | Required when `storage.driver=sqlite`. |
+| `storage.dsn` | string | `""` | Conditional | Required when `storage.driver=postgres`. |
+
+### `providers`
+
+`providers.openai` and `providers.anthropic` share the same schema.
+
+| Field | Type | Default | Required | Notes |
+| --- | --- | --- | --- | --- |
+| `providers.<provider>.upstream` | string | OpenAI: `https://api.openai.com` Anthropic: `https://api.anthropic.com` | Yes | Must include scheme and host. |
+| `providers.<provider>.prefix` | string | OpenAI: `/openai` Anthropic: `/anthropic` | Yes | Must start with `/`. Used for proxy path matching. |
+
+### `tracing`
+
+| Field | Type | Default | Required | Notes |
+| --- | --- | --- | --- | --- |
+| `tracing.capture_bodies` | bool | `false` | No | If `true`, gateway stores captured request and response bodies after PII processing. |
+| `tracing.body_max_size` | int | `1048576` | No | Max captured bytes per request and response body. If set to `0` or a negative value, runtime falls back to `1048576`. |
+
+### `observability`
+
+| Field | Type | Default | Required | Notes |
+| --- | --- | --- | --- | --- |
+| `observability.otel.enabled` | bool | `false` | No | Enables native OpenTelemetry trace and metric export. |
+| `observability.otel.endpoint` | string | `localhost:4318` | Conditional | Required when `enabled=true`. Accepts `host:port` or `http(s)://host:port`. |
+| `observability.otel.insecure` | bool | `true` | No | Enables plaintext OTLP HTTP export (recommended for local collectors). |
+| `observability.otel.service_name` | string | `ongoingai-gateway` | Conditional | Required when `enabled=true`. Sent as `service.name`. |
+| `observability.otel.traces_enabled` | bool | `true` | Conditional | At least one of `traces_enabled` or `metrics_enabled` must be `true` when enabled. |
+| `observability.otel.metrics_enabled` | bool | `true` | Conditional | At least one of `traces_enabled` or `metrics_enabled` must be `true` when enabled. |
+| `observability.otel.sampling_ratio` | float64 | `1.0` | No | Trace sampling ratio in range `0.0` to `1.0` (parent-based). |
+| `observability.otel.export_timeout_ms` | int | `3000` | No | OTLP export timeout in milliseconds; must be `> 0`. |
+| `observability.otel.metric_export_interval_ms` | int | `10000` | No | Periodic metric export interval in milliseconds; must be `> 0`. |
+
+### `pii`
+
+| Field | Type | Default | Required | Notes |
+| --- | --- | --- | --- | --- |
+| `pii.mode` | string | `""` | No | Effective mode is computed when empty: `off` if `capture_bodies=false`, else `redact_storage`. |
+| `pii.policy_id` | string | `default/v1` | No | Included in trace metadata as `redaction_policy_id`. |
+| `pii.scopes` | object[] | `[]` | No | Optional scoped policy overrides. The most specific matching scope wins. Ties resolve by declaration order. |
+| `pii.stages.request_headers` | bool | `true` | No | Enables custom header denylist on request headers. |
+| `pii.stages.request_body` | bool | `true` | No | Enables request body redaction for storage capture and request-path guardrail modes. |
+| `pii.stages.response_headers` | bool | `true` | No | Enables custom header denylist on response headers. |
+| `pii.stages.response_body` | bool | `true` | No | Enables response body redaction when body capture is enabled. |
+| `pii.detectors.email` | bool | `true` | No | Redacts email-like strings in body content. |
+| `pii.detectors.phone` | bool | `true` | No | Redacts phone-like strings in body content. |
+| `pii.detectors.ssn` | bool | `true` | No | Redacts SSN-like strings in body content. |
+| `pii.detectors.token_like` | bool | `true` | No | Redacts token-like secrets in body content. |
+| `pii.headers.denylist` | string[] | See default config | No | Additional header names to redact. Built-in sensitive headers are always redacted. |
+| `pii.body.key_denylist` | string[] | See default config | No | JSON field-name denylist for body redaction. Matching ignores case and separators. |
+| `pii.replacement.format` | string | `[{type}_REDACTED:{hash}]` | No | Placeholders: `{type}` and `{hash}`. |
+| `pii.replacement.hash_salt` | string | `""` | No | Optional extra salt for placeholder hashes. |
+
+Validation:
+- Allowed values for `pii.mode`: `off`, `redact_storage`,
+  `redact_upstream`, `block`.
+- All listed modes are supported in this release.
+- In `redact_upstream` and `block`, provider-route request bodies are inspected
+  within `tracing.body_max_size` and fail closed on policy-evaluation
+  uncertainty.
+- `pii.scopes[].match` must include at least one of: `org_id`, `workspace_id`,
+  `key_id`, `provider`, `route_prefix`.
+- `pii.scopes[].match.route_prefix` must start with `/` when set.
+- `pii.scopes[].mode`, when set, must be one of `off`, `redact_storage`,
+  `redact_upstream`, `block`.
+
+### `auth`
+
+| Field | Type | Default | Required | Notes |
+| --- | --- | --- | --- | --- |
+| `auth.enabled` | bool | `false` | No | If `true`, proxy and protected API routes require a gateway key. |
+| `auth.header` | string | `X-OngoingAI-Gateway-Key` | Yes | Must not be empty. |
+| `auth.keys` | object[] | `[]` | Conditional | Required when `auth.enabled=true` and no active keys are loaded from Postgres config store. |
+
+`auth.keys[]` fields:
+
+| Field | Type | Default | Required | Notes |
+| --- | --- | --- | --- | --- |
+| `id` | string | `""` | Recommended | Key identifier used in audit and metadata fields. |
+| `token` | string | `""` | Yes for static keys | Raw key token. |
+| `org_id` | string | `default` (runtime fallback) | Recommended | Tenant organization scope. |
+| `workspace_id` | string | `default` (runtime fallback) | Recommended | Tenant workspace scope. |
+| `team` | string | `""` | Optional | Backward-compatible alias for `workspace_id`. |
+| `name` | string | `""` | Optional | Label for key management APIs. |
+| `description` | string | `""` | Optional | Key description for operators. |
+| `created_by` | string | `""` | Optional | Audit attribution field. |
+| `role` | string | `""` | Optional | Implicit permission defaults are applied by role. |
+| `permissions` | string[] | `[]` | Optional | Additional permissions merged with role defaults. |
+
+Role defaults:
+- `owner`, `admin`: `proxy:write`, `analytics:read`, `keys:manage`
+- `developer`, `member`: `proxy:write`, `analytics:read`
+- `viewer`: `analytics:read`
+
+### `limits`
+
+| Field | Type | Default | Required | Notes |
+| --- | --- | --- | --- | --- |
+| `limits.per_key.requests_per_minute` | int | `0` | No | Per-key rolling 1-minute request limit. |
+| `limits.per_key.max_tokens_per_day` | int64 | `0` | No | Per-key UTC-day token ceiling. |
+| `limits.per_key.max_cost_usd_per_day` | float64 | `0` | No | Per-key UTC-day estimated cost ceiling. |
+| `limits.per_workspace.requests_per_minute` | int | `0` | No | Per-workspace rolling 1-minute request limit. |
+| `limits.per_workspace.max_tokens_per_day` | int64 | `0` | No | Per-workspace UTC-day token ceiling. |
+| `limits.per_workspace.max_cost_usd_per_day` | float64 | `0` | No | Per-workspace UTC-day estimated cost ceiling. |
+
+Limit behavior:
+- Use positive values to enable a limit.
+- `0` or negative values are treated as disabled.
+- Limit checks apply only when `auth.enabled=true` because limits are enforced
+  in the auth middleware path.
+
+## Environment variable overrides
+
+The following fields support env var overrides:
+
+| Field | Environment variable |
+| --- | --- |
+| `server.host` | `ONGOINGAI_HOST` |
+| `server.port` | `ONGOINGAI_PORT` |
+| `storage.driver` | `ONGOINGAI_STORAGE_DRIVER` |
+| `storage.path` | `ONGOINGAI_STORAGE_PATH` |
+| `storage.dsn` | `ONGOINGAI_STORAGE_DSN` |
+| `providers.openai.upstream` | `ONGOINGAI_OPENAI_UPSTREAM` |
+| `providers.anthropic.upstream` | `ONGOINGAI_ANTHROPIC_UPSTREAM` |
+| `tracing.capture_bodies` | `ONGOINGAI_CAPTURE_BODIES` |
+| `tracing.body_max_size` | `ONGOINGAI_BODY_MAX_SIZE` |
+| `observability.otel.enabled` | `OTEL_SDK_DISABLED` (inverse: `false` enables SDK) |
+| `observability.otel.endpoint` | `OTEL_EXPORTER_OTLP_ENDPOINT` |
+| `observability.otel.insecure` | `OTEL_EXPORTER_OTLP_INSECURE` |
+| `observability.otel.service_name` | `OTEL_SERVICE_NAME` |
+| `observability.otel.traces_enabled` | `OTEL_TRACES_EXPORTER` (`otlp` or `none`) |
+| `observability.otel.metrics_enabled` | `OTEL_METRICS_EXPORTER` (`otlp` or `none`) |
+| `observability.otel.sampling_ratio` | `OTEL_TRACES_SAMPLER_ARG` |
+| `observability.otel.export_timeout_ms` | `OTEL_EXPORTER_OTLP_TIMEOUT` |
+| `observability.otel.metric_export_interval_ms` | `OTEL_METRIC_EXPORT_INTERVAL` |
+| `pii.mode` | `ONGOINGAI_PII_MODE` |
+| `pii.policy_id` | `ONGOINGAI_PII_POLICY_ID` |
+| `pii.replacement.hash_salt` | `ONGOINGAI_PII_HASH_SALT` |
+| `auth.enabled` | `ONGOINGAI_AUTH_ENABLED` |
+| `auth.header` | `ONGOINGAI_AUTH_HEADER` |
+
+OpenTelemetry enablement with env vars:
+- Any configured OTEL override enables gateway OTel instrumentation by default.
+- `OTEL_SDK_DISABLED=true` disables gateway OTel instrumentation.
+
+Fields not listed in this table do not have env var overrides in this release.
+
+## Example configurations
+
+### Minimal local config (SQLite, no gateway auth)
+
+```yaml filename="ongoingai.yaml"
+server:
+  host: 0.0.0.0
+  port: 8080
+
+storage:
+  driver: sqlite
+  path: ./data/ongoingai.db
+
+providers:
+  openai:
+    upstream: https://api.openai.com
+    prefix: /openai
+  anthropic:
+    upstream: https://api.anthropic.com
+    prefix: /anthropic
+
+tracing:
+  capture_bodies: false
+  body_max_size: 1048576
+```
+
+### Team mode config (Postgres, gateway auth, limits)
+
+```yaml filename="ongoingai.yaml"
+server:
+  host: 0.0.0.0
+  port: 8080
+
+storage:
+  driver: postgres
+  dsn: POSTGRES_DSN
+
+providers:
+  openai:
+    upstream: https://api.openai.com
+    prefix: /openai
+  anthropic:
+    upstream: https://api.anthropic.com
+    prefix: /anthropic
+
+tracing:
+  capture_bodies: true
+  body_max_size: 262144
+
+pii:
+  mode: redact_storage
+  policy_id: default/v1
+
+auth:
+  enabled: true
+  header: X-OngoingAI-Gateway-Key
+  keys:
+    - id: dev-key-1
+      token: GATEWAY_KEY_TOKEN
+      org_id: org-a
+      workspace_id: workspace-a
+      role: developer
+
+limits:
+  per_key:
+    requests_per_minute: 120
+    max_tokens_per_day: 500000
+    max_cost_usd_per_day: 25
+  per_workspace:
+    requests_per_minute: 600
+    max_tokens_per_day: 5000000
+    max_cost_usd_per_day: 250
+```
+
+Placeholders:
+- `POSTGRES_DSN`: Postgres DSN, for example
+  `postgres://user:pass@db.example.com:5432/ongoingai?sslmode=require`.
+- `GATEWAY_KEY_TOKEN`: Gateway key token used in the auth header.
+
+## Validate configuration
+
+```bash filename="Terminal"
+ongoingai config validate --config ongoingai.yaml
+```
+
+You should see `config is valid: ongoingai.yaml` when validation succeeds.
+
+## Validation failures you will see
+
+### `server.port must be between 1 and 65535`
+
+- Symptom: Config validation fails on startup.
+- Cause: `server.port` is out of range.
+- Fix: Set `server.port` to a value between `1` and `65535`.
+
+### `storage.path is required when storage.driver=sqlite`
+
+- Symptom: Validation fails with sqlite configuration.
+- Cause: `storage.path` is empty while `storage.driver=sqlite`.
+- Fix: Set `storage.path` to a writable file path.
+
+### `storage.dsn is required when storage.driver=postgres`
+
+- Symptom: Validation fails with postgres configuration.
+- Cause: `storage.dsn` is empty while `storage.driver=postgres`.
+- Fix: Set a valid Postgres DSN in `storage.dsn`.
+
+### `providers.<provider>.prefix must start with '/'`
+
+- Symptom: Validation fails for provider settings.
+- Cause: Provider prefix does not start with `/`.
+- Fix: Use values like `/openai` and `/anthropic`.
+
+### `providers.<provider>.upstream must include scheme and host`
+
+- Symptom: Validation fails for provider upstream settings.
+- Cause: Upstream URL is missing a scheme or host.
+- Fix: Use full URLs such as `https://api.openai.com`.
+
+### Proxy request denied by PII guardrail policy
+
+- Symptom: Provider route requests return `403` or `503` with a guardrail denial
+  message.
+- Cause: In `redact_upstream` or `block`, policy evaluation failed (for example
+  oversized body, unsupported content type, or redaction evaluation error) or
+  `block` mode detected protected content.
+- Fix: Keep request bodies within `tracing.body_max_size`, use JSON/text request
+  bodies for guarded routes, or switch to `redact_storage` when you need
+  storage-only redaction.
+
+Status semantics:
+- `403`: `block` mode detected protected content.
+- `503`: policy uncertainty prevented evaluation in `redact_upstream` or `block`
+  (fail closed).
+
+### `auth.header must not be empty`
+
+- Symptom: Validation fails for auth settings.
+- Cause: `auth.header` is blank.
+- Fix: Set a non-empty header name, such as `X-OngoingAI-Gateway-Key`.
+
+## Next steps
+
+- [Environment variable reference](/gateway/reference/env-var-reference)
+- [CLI reference](/gateway/reference/cli-reference)
+- [Authorization reference](/gateway/reference/authorization-reference)

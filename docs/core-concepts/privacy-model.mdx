@@ -1,0 +1,122 @@
+---
+title: Privacy model
+description: Understand what OngoingAI Gateway stores, what it redacts, and how privacy controls affect traces.
+related:
+  title: Next steps
+  description: Continue with operational privacy controls and configuration.
+  links:
+    - gateway/capabilities/privacy-and-sensitive-data-handling
+    - gateway/core-concepts/traces-and-audit-model
+    - gateway/reference/config-reference
+---
+
+OngoingAI Gateway treats privacy as a storage and observability concern.
+It forwards provider traffic while limiting what is persisted in traces.
+
+## Choose this model when
+
+- You need model usage, latency, and cost data for operations.
+- You need controls for sensitive content in AI payloads.
+- You need predictable privacy-risk controls in shared deployments.
+- You need enough metadata for incident debugging without default body storage.
+
+## Privacy model summary
+
+1. The gateway proxies requests to providers.
+2. Sensitive auth headers are redacted before trace persistence.
+3. Request and response bodies are not stored unless you enable body capture.
+4. If body capture is enabled, storage redaction is the effective default.
+5. Trace metadata is written asynchronously so proxy traffic is not blocked by
+   trace storage.
+
+## Credential boundaries
+
+- Provider credentials pass through to upstream providers for request handling.
+- Provider credential values are redacted in stored trace headers.
+- Gateway key headers are used for gateway auth and stripped before upstream
+  forwarding.
+
+## What data is persisted
+
+| Data type | Default behavior | Notes |
+|----------|------------------|-------|
+| Request and response bodies | Not stored | Controlled by `tracing.capture_bodies`. |
+| Sensitive auth headers | Redacted | `authorization`, `x-api-key`, `x-ongoingai-gateway-key`, `cookie`, `set-cookie`. |
+| Provider key identity | Stored as hash | `api_key_hash` is stored; last 4 chars are added to metadata when present. |
+| Usage and performance metadata | Stored | Includes model, token counts, latency, TTFT, provider, status code, and path. |
+| Tenant and gateway key attribution | Stored when available | Includes `org_id`, `workspace_id`, `gateway_key_id`, and role metadata. |
+
+## How redaction works
+
+1. Body-capture middleware records headers and optional body copies with a max
+   size cap (`tracing.body_max_size`).
+2. Header redaction always applies to sensitive credential headers.
+3. If `tracing.capture_bodies=false`, request and response bodies are not
+   persisted.
+4. If `tracing.capture_bodies=true` and mode is `redact_storage`, the gateway
+   redacts the captured body copy before persistence.
+5. Trace metadata records redaction details such as
+   `redaction_mode`, `redaction_applied`, `redaction_counts`,
+   and `redaction_truncated`.
+
+## PII mode behavior
+
+- `off`: Body content is stored as captured when body capture is enabled.
+- `redact_storage`: Body content is redacted before storage. Upstream forwarding
+  remains unchanged.
+- `redact_upstream`: Request body content is redacted before provider forwarding
+  on proxied provider routes.
+- `block`: Request is denied when configured detectors find protected content.
+
+## Stage and detector controls
+
+- `pii.stages.request_body` and `pii.stages.response_body` control which body
+  sides are redacted.
+- `pii.stages.request_headers` and `pii.stages.response_headers` control whether
+  custom header denylist entries are applied.
+- `pii.detectors` controls pattern detectors such as email, phone, SSN, and
+  token-like values.
+- `pii.body.key_denylist` redacts JSON fields by key name.
+- `pii.replacement.format` and `pii.replacement.hash_salt` control placeholder
+  format and hashing inputs.
+- `pii.scopes[]` applies scoped overrides by org/workspace/key/provider/route.
+  The most specific matching scope is selected.
+
+## Failure behavior
+
+- In `redact_storage` mode, if body redaction fails, the gateway drops body
+  persistence for that trace and continues proxy traffic.
+- In `redact_upstream` and `block`, the gateway fails closed if policy
+  evaluation cannot complete on the request body, returning `503`.
+- In `block`, if detection succeeds and protected content is found, the request
+  is denied with `403`.
+- When body capture is truncated by size limit, metadata includes
+  `redaction_truncated=true` when redaction is active.
+- If configuration is invalid, startup fails fast during `ongoingai serve` or
+  `ongoingai config validate`.
+
+## Concrete example
+
+Given this captured request body:
+
+```json filename="Captured request body"
+{"email":"alex@example.com","api_key":"sk_test_1234567890"}
+```
+
+With body capture enabled and `pii.mode=redact_storage`, stored content becomes
+placeholder values:
+
+```json filename="Stored trace request body"
+{"email":"[EMAIL_REDACTED:...]","api_key":"[FIELD_REDACTED:...]"}
+```
+
+The trace metadata also records redaction context:
+- `redaction_mode: redact_storage`
+- `redaction_applied: true`
+- `redaction_counts: {...}`
+
+## Next steps
+
+- [Learn operational controls](/gateway/capabilities/privacy-and-sensitive-data-handling)
+- [Review trace data structure](/gateway/core-concepts/traces-and-audit-model)
+- [Review configuration fields](/gateway/reference/config-reference)

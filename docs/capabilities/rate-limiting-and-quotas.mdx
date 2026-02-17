@@ -1,0 +1,210 @@
+---
+title: Rate limiting and quotas
+description: Enforce per-key and per-workspace request, token, and cost limits on provider proxy traffic.
+related:
+  title: Next steps
+  description: Continue with auth policy, analytics views, and configuration details.
+  links:
+    - gateway/capabilities/gateway-auth-rbac-and-key-lifecycle
+    - gateway/capabilities/analytics-cost-and-token-accounting
+    - gateway/reference/config-reference
+---
+
+Use this page to configure request and usage guardrails for provider traffic in
+OngoingAI Gateway.
+It covers enforcement scope, limit codes, and verification steps.
+
+## Enforcement scope
+
+- Enforces per-key and per-workspace request rate limits.
+- Enforces per-key and per-workspace daily token quotas.
+- Enforces per-key and per-workspace daily cost quotas.
+- Returns `429` with structured limit codes when a limit is exceeded.
+- Sets `Retry-After` for request-rate limit responses.
+
+## Operational fit
+
+- You need spend control for shared model usage.
+- You need burst protection against abusive request patterns.
+- You need fair-share protection across workspaces and keys.
+
+## Evaluation order
+
+1. Limits run on proxied provider routes (`/openai/*` and `/anthropic/*`).
+2. Limits use authenticated gateway identity (`org_id`, `workspace_id`, key ID)
+   for scope.
+3. Daily quotas are checked first from persisted trace analytics for the current
+   UTC day.
+4. Request-rate limits are then checked with in-memory sliding one-minute
+   windows.
+5. If a limit is exceeded, middleware returns `429` with an error code and
+   message.
+6. For request-rate limits, responses include `retry_after_seconds` and
+   `Retry-After`.
+
+Limit codes:
+- `KEY_RATE_LIMIT_EXCEEDED`
+- `WORKSPACE_RATE_LIMIT_EXCEEDED`
+- `KEY_DAILY_TOKENS_EXCEEDED`
+- `WORKSPACE_DAILY_TOKENS_EXCEEDED`
+- `KEY_DAILY_COST_EXCEEDED`
+- `WORKSPACE_DAILY_COST_EXCEEDED`
+
+Limits are enforced only when gateway auth is enabled because limiter scope
+depends on authenticated identity.
+
+## Starter limits config
+
+```yaml filename="ongoingai.yaml"
+auth:
+  enabled: true
+  header: X-OngoingAI-Gateway-Key
+
+limits:
+  per_key:
+    requests_per_minute: 120
+    max_tokens_per_day: 1000000
+    max_cost_usd_per_day: 50
+  per_workspace:
+    requests_per_minute: 500
+    max_tokens_per_day: 5000000
+    max_cost_usd_per_day: 200
+```
+
+Set limit values greater than `0` to enable each threshold.
+A value of `0` disables that threshold.
+
+## Policy patterns
+
+- Start with request-rate limits only, then add daily quotas after usage
+  baselining.
+- Use stricter per-key limits with a higher per-workspace envelope.
+- Use workspace daily cost limits as a team budget guardrail.
+- Keep per-key IDs stable so key-scoped daily quotas can attribute usage
+  correctly.
+
+## Example limit profiles
+
+### Strict per-key burst control with workspace headroom
+
+```yaml filename="ongoingai.yaml"
+auth:
+  enabled: true
+  header: X-OngoingAI-Gateway-Key
+
+limits:
+  per_key:
+    requests_per_minute: 30
+    max_tokens_per_day: 0
+    max_cost_usd_per_day: 0
+  per_workspace:
+    requests_per_minute: 300
+    max_tokens_per_day: 0
+    max_cost_usd_per_day: 0
+```
+
+### Daily budget ceiling for shared workspace usage
+
+```yaml filename="ongoingai.yaml"
+auth:
+  enabled: true
+  header: X-OngoingAI-Gateway-Key
+
+limits:
+  per_key:
+    requests_per_minute: 120
+    max_tokens_per_day: 1000000
+    max_cost_usd_per_day: 25
+  per_workspace:
+    requests_per_minute: 600
+    max_tokens_per_day: 8000000
+    max_cost_usd_per_day: 200
+```
+
+## Verification steps
+
+1. Configure a low request-rate threshold for test traffic.
+
+   ```yaml filename="ongoingai.yaml"
+   auth:
+     enabled: true
+     header: X-OngoingAI-Gateway-Key
+
+   limits:
+     per_key:
+       requests_per_minute: 2
+       max_tokens_per_day: 0
+       max_cost_usd_per_day: 0
+   ```
+
+2. Start the gateway in Terminal A.
+
+   ```bash filename="Terminal A"
+   ongoingai config validate
+   ongoingai serve
+   ```
+
+3. Send three provider requests quickly from Terminal B.
+
+   ```bash filename="Terminal B"
+   for i in 1 2 3; do
+     curl -i "http://localhost:8080/openai/v1/models" \
+       -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY" \
+       -H "Authorization: Bearer $OPENAI_API_KEY"
+   done
+   ```
+
+Placeholders:
+- `GATEWAY_KEY`: Gateway key token with `proxy:write`.
+- `OPENAI_API_KEY`: Upstream provider API key.
+
+You should see:
+- First requests pass through to provider behavior.
+- A `429` response once the per-key rate threshold is exceeded.
+- Response body fields `error`, `code`, and `retry_after_seconds`.
+- `Retry-After` response header for request-rate limits.
+
+## Troubleshooting
+
+### Limits do not trigger
+
+- Symptom: High request volume never returns `429`.
+- Cause: `auth.enabled=false`, limits are zero, or traffic bypasses provider
+  routes.
+- Fix: Enable auth, set limits above zero, and route traffic through
+  `/openai/*` or `/anthropic/*`.
+
+### `429` returns workspace limit code unexpectedly
+
+- Symptom: Response code is `WORKSPACE_*` when per-key limits look low.
+- Cause: Workspace thresholds are checked independently and may be lower than
+  aggregate key traffic.
+- Fix: Raise workspace thresholds or redistribute key traffic by workspace.
+
+### `429` responses are inconsistent across multiple gateway instances
+
+- Symptom: Rate limits trigger differently per request path through load
+  balancers.
+- Cause: Request-rate counters are in-memory per gateway process.
+- Fix: Treat current rate limiting as per-instance, or run a single gateway
+  instance for strict global RPM behavior.
+
+### Daily quotas lag behind in-flight traffic
+
+- Symptom: Daily token or cost limits trigger after a short delay.
+- Cause: Daily quotas are based on persisted trace data, and trace writes are
+  asynchronous.
+- Fix: Expect short lag under burst load, and set conservative headroom in
+  quota thresholds.
+
+### Proxy responses return `503` for usage limit checks
+
+- Symptom: Response error is `gateway usage limit check unavailable`.
+- Cause: Trace store analytics query failed during limit evaluation.
+- Fix: Restore trace storage health and verify storage connectivity.
+
+## Next steps
+
+- [Gateway auth, RBAC, and key lifecycle](/gateway/capabilities/gateway-auth-rbac-and-key-lifecycle)
+- [Analytics, cost, and token accounting](/gateway/capabilities/analytics-cost-and-token-accounting)
+- [Config reference](/gateway/reference/config-reference)

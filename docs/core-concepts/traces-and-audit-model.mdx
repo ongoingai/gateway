@@ -1,0 +1,70 @@
+---
+title: Traces and audit model
+description: Understand what trace records include, how audit events are emitted, and how scope is applied.
+related:
+  title: Next steps
+  description: Continue with tracing operations, privacy controls, and API details.
+  links:
+    - gateway/capabilities/tracing-and-audit-logs
+    - gateway/core-concepts/privacy-model
+    - gateway/reference/rest-api-reference
+---
+
+Use this page to understand the data model behind traces and audit visibility
+in OngoingAI Gateway.
+
+## Use this model when
+
+- You need to design trace retention and reporting workflows.
+- You need to explain which events are observable in logs and APIs.
+- You need to validate tenant-scoped visibility for traces and analytics.
+
+## Trace record model
+
+Each proxied provider request produces one trace record.
+
+Trace records can include:
+
+- Request and response metadata such as method, route, status, and latency.
+- Model, token, and estimated cost fields when provider responses include usage
+  data.
+- Streaming metadata such as chunk count and time to first token.
+- Tenant attribution such as `org_id`, `workspace_id`, and `gateway_key_id`
+  when auth scope is available.
+- Provider key attribution as a hash identifier (`api_key_hash`), not raw key
+  material.
+
+## Capture behavior
+
+- Metadata capture is always on for proxied provider routes.
+- Request and response body persistence is opt-in (`tracing.capture_bodies`).
+- Sensitive credential headers are redacted before persistence.
+- Trace writes are asynchronous and use a bounded queue.
+
+If the trace queue is full or persistence fails, proxy forwarding continues and
+the gateway logs the trace-write failure.
+
+## Audit event model
+
+The gateway emits structured audit log events for:
+
+- Gateway auth deny outcomes (`401` and `403` decisions).
+- Gateway key lifecycle actions (create, revoke, and rotate) when supported by
+  the active key store backend.
+
+Audit events are written to structured logs and can be ingested by external log
+pipelines.
+
+## Scope model
+
+- If `auth.enabled=true`, trace and analytics reads are filtered by caller
+  tenant scope.
+- Cross-tenant trace detail reads are denied with not-found semantics.
+- If `auth.enabled=false`, tenant scope is not injected from gateway key
+  identity.
+
+## Next steps
+
+- [Configure tracing and audit operations](/gateway/capabilities/tracing-and-audit-logs)
+- [Review privacy model and redaction behavior](/gateway/core-concepts/privacy-model)
+- [Review trace and analytics API endpoints](/gateway/reference/rest-api-reference)

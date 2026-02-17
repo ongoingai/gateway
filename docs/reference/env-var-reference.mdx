@@ -1,0 +1,167 @@
+---
+title: Environment variable reference
+description: Override selected ongoingai.yaml fields with ONGOINGAI_* environment variables.
+related:
+  title: Next steps
+  description: Continue with config schema details and CLI validation workflows.
+  links:
+    - gateway/reference/config-reference
+    - gateway/reference/cli-reference
+    - gateway/get-started/quickstart
+---
+
+Use this page to override gateway config values at process start.
+It documents supported variables, parse rules, and common failure cases.
+
+## How overrides work
+
+1. Gateway loads built-in defaults.
+2. Gateway applies `ongoingai.yaml` values when the file exists.
+3. Gateway applies supported `ONGOINGAI_*` env vars last.
+
+Env vars override YAML only when the env value is non-empty.
+If you set a variable to an empty string, gateway ignores it.
+
+## Supported variables
+
+| Variable | Type and parse rule | Overrides | Example |
+| --- | --- | --- | --- |
+| `ONGOINGAI_HOST` | string | `server.host` | `ONGOINGAI_HOST=127.0.0.1` |
+| `ONGOINGAI_PORT` | int (`Atoi`) | `server.port` | `ONGOINGAI_PORT=9090` |
+| `ONGOINGAI_STORAGE_DRIVER` | string | `storage.driver` | `ONGOINGAI_STORAGE_DRIVER=postgres` |
+| `ONGOINGAI_STORAGE_PATH` | string | `storage.path` | `ONGOINGAI_STORAGE_PATH=./data/ongoingai.db` |
+| `ONGOINGAI_STORAGE_DSN` | string | `storage.dsn` | `ONGOINGAI_STORAGE_DSN=postgres://user:pass@db:5432/ongoingai?sslmode=require` |
+| `ONGOINGAI_OPENAI_UPSTREAM` | string | `providers.openai.upstream` | `ONGOINGAI_OPENAI_UPSTREAM=https://api.openai.com` |
+| `ONGOINGAI_ANTHROPIC_UPSTREAM` | string | `providers.anthropic.upstream` | `ONGOINGAI_ANTHROPIC_UPSTREAM=https://api.anthropic.com` |
+| `ONGOINGAI_CAPTURE_BODIES` | bool (`ParseBool`) | `tracing.capture_bodies` | `ONGOINGAI_CAPTURE_BODIES=true` |
+| `ONGOINGAI_BODY_MAX_SIZE` | int (`Atoi`) | `tracing.body_max_size` | `ONGOINGAI_BODY_MAX_SIZE=262144` |
+| `OTEL_SDK_DISABLED` | bool (`ParseBool`) | `observability.otel.enabled` (inverse) | `OTEL_SDK_DISABLED=false` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | string | `observability.otel.endpoint` | `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318` |
+| `OTEL_EXPORTER_OTLP_INSECURE` | bool (`ParseBool`) | `observability.otel.insecure` | `OTEL_EXPORTER_OTLP_INSECURE=true` |
+| `OTEL_SERVICE_NAME` | string | `observability.otel.service_name` | `OTEL_SERVICE_NAME=ongoingai-gateway` |
+| `OTEL_TRACES_EXPORTER` | enum (`otlp`/`none`) | `observability.otel.traces_enabled` | `OTEL_TRACES_EXPORTER=otlp` |
+| `OTEL_METRICS_EXPORTER` | enum (`otlp`/`none`) | `observability.otel.metrics_enabled` | `OTEL_METRICS_EXPORTER=otlp` |
+| `OTEL_TRACES_SAMPLER_ARG` | float (`ParseFloat`) | `observability.otel.sampling_ratio` | `OTEL_TRACES_SAMPLER_ARG=0.25` |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | int (`Atoi`) | `observability.otel.export_timeout_ms` | `OTEL_EXPORTER_OTLP_TIMEOUT=3000` |
+| `OTEL_METRIC_EXPORT_INTERVAL` | int (`Atoi`) | `observability.otel.metric_export_interval_ms` | `OTEL_METRIC_EXPORT_INTERVAL=10000` |
+| `ONGOINGAI_PII_MODE` | string | `pii.mode` | `ONGOINGAI_PII_MODE=redact_storage` |
+| `ONGOINGAI_PII_POLICY_ID` | string | `pii.policy_id` | `ONGOINGAI_PII_POLICY_ID=default/v1` |
+| `ONGOINGAI_PII_HASH_SALT` | string | `pii.replacement.hash_salt` | `ONGOINGAI_PII_HASH_SALT=workspace-salt` |
+| `ONGOINGAI_AUTH_ENABLED` | bool (`ParseBool`) | `auth.enabled` | `ONGOINGAI_AUTH_ENABLED=true` |
+| `ONGOINGAI_AUTH_HEADER` | string | `auth.header` | `ONGOINGAI_AUTH_HEADER=X-Internal-Gateway-Key` |
+
+OpenTelemetry auto-enable behavior:
+- If any OTEL exporter/service/sampler variable above is set, gateway enables
+  OTEL by default.
+- `OTEL_SDK_DISABLED=true` always disables gateway OTEL instrumentation.
+
+## Values without env overrides
+
+The following config areas do not support env var overrides in this release:
+
+- `providers.*.prefix`
+- `pii.stages.*`
+- `pii.detectors.*`
+- `pii.headers.denylist`
+- `pii.body.key_denylist`
+- `pii.replacement.format`
+- `auth.keys`
+- `limits.*`
+
+## Type and validation behavior
+
+- `ONGOINGAI_PORT` and `ONGOINGAI_BODY_MAX_SIZE` must parse as integers.
+- `ONGOINGAI_CAPTURE_BODIES` and `ONGOINGAI_AUTH_ENABLED` must parse as booleans.
+- OpenTelemetry bool fields (`OTEL_SDK_DISABLED`, `OTEL_EXPORTER_OTLP_INSECURE`) must parse as booleans.
+- OpenTelemetry integer fields (`OTEL_EXPORTER_OTLP_TIMEOUT`, `OTEL_METRIC_EXPORT_INTERVAL`) must parse as integers.
+- OpenTelemetry sampling field (`OTEL_TRACES_SAMPLER_ARG`) must parse as float.
+- OpenTelemetry exporter selectors (`OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`) accept `otlp` or `none`.
+- String variables are applied as-is, then checked by config validation.
+- If a string override is invalid for the target field, `ongoingai config validate`
+  fails with a field-specific error.
+
+Examples:
+- `ONGOINGAI_STORAGE_DRIVER=invalid` fails with:
+  `storage.driver must be one of sqlite, postgres`.
+- `ONGOINGAI_OPENAI_UPSTREAM=api.openai.com` fails with:
+  `providers.openai.upstream must include scheme and host`.
+
+## Examples
+
+### Override server port for one command
+
+```bash filename="Terminal"
+ONGOINGAI_PORT=9090 ongoingai config validate --config ongoingai.yaml
+ONGOINGAI_PORT=9090 ongoingai serve --config ongoingai.yaml
+```
+
+### Enable Postgres without editing YAML
+
+```bash filename="Terminal"
+ONGOINGAI_STORAGE_DRIVER=postgres \
+ONGOINGAI_STORAGE_DSN=POSTGRES_DSN \
+ongoingai config validate --config ongoingai.yaml
+```
+
+Placeholder:
+- `POSTGRES_DSN`: Postgres DSN, for example
+  `postgres://user:pass@db.example.com:5432/ongoingai?sslmode=require`.
+
+### Enable gateway auth with a custom header
+
+```bash filename="Terminal"
+ONGOINGAI_AUTH_ENABLED=true \
+ONGOINGAI_AUTH_HEADER=X-Internal-Gateway-Key \
+ongoingai serve --config ongoingai.yaml
+```
+
+## Verification workflow
+
+1. Set one override and validate config:
+
+   ```bash filename="Terminal"
+   ONGOINGAI_PORT=9090 ongoingai config validate --config ongoingai.yaml
+   ```
+
+2. Start the gateway with the same override:
+
+   ```bash filename="Terminal"
+   ONGOINGAI_PORT=9090 ongoingai serve --config ongoingai.yaml
+   ```
+
+You should see a startup log line with `port` set to `9090`.
+
+## Troubleshooting
+
+### `invalid ONGOINGAI_PORT`
+
+- Symptom: `ongoingai config validate` fails before field validation.
+- Cause: `ONGOINGAI_PORT` is not an integer.
+- Fix: Set an integer value such as `8080` or `9090`.
+
+### Invalid bool/float OTEL env values
+
+- Symptom: Config load fails with an invalid bool env var error.
+- Cause: A standard OTEL bool (`OTEL_SDK_DISABLED`,
+  `OTEL_EXPORTER_OTLP_INSECURE`) or float (`OTEL_TRACES_SAMPLER_ARG`) env
+  value does not parse.
+- Fix: Use valid bool values such as `true`/`false` and decimal floats such as
+  `0.25`.
+
+### Env var set but value does not change
+
+- Symptom: Gateway behavior still matches YAML.
+- Cause: Env var is empty, so override is skipped.
+- Fix: Set a non-empty env var value.
+
+### Expected env override is missing
+
+- Symptom: You cannot override a field with env vars.
+- Cause: That field does not have env mapping in this release.
+- Fix: Set the value in `ongoingai.yaml` instead.
+
+## Next steps
+
+- [Config reference](/gateway/reference/config-reference)
+- [CLI reference](/gateway/reference/cli-reference)
+- [Quickstart](/gateway/get-started/quickstart)

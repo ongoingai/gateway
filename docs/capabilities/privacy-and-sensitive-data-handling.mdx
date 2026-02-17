@@ -1,0 +1,239 @@
+---
+title: Privacy and sensitive-data handling
+description: Configure body capture and storage redaction to reduce sensitive data risk in trace records.
+related:
+  title: Next steps
+  description: Continue with privacy model details, tracing operations, and config fields.
+  links:
+    - gateway/core-concepts/privacy-model
+    - gateway/capabilities/tracing-and-audit-logs
+    - gateway/reference/config-reference
+---
+
+Use this page to configure privacy controls for trace persistence in OngoingAI
+Gateway.
+It explains safe defaults, redaction behavior, and verification steps.
+
+## Privacy guarantees
+
+- Keeps request and response body storage disabled by default.
+- Redacts sensitive credential headers before trace persistence.
+- Supports storage-stage body redaction with configurable detectors and key
+  denylist.
+- Records redaction outcome metadata in trace records.
+- Preserves provider credential pass-through while redacting raw credential
+  headers in stored traces.
+
+## Operational fit
+
+- You need lower risk for data stored in trace records.
+- You need to collect useful operational metadata without storing raw payloads.
+- You need privacy controls that still preserve debugging and analytics value.
+
+## Redaction pipeline
+
+1. Capture middleware records headers and optional body bytes with size limits.
+2. Sensitive credential headers are replaced with `[REDACTED]` before storage.
+3. Built-in credential header redaction is always active.
+4. `pii.stages.*_headers` controls custom header denylist application.
+5. If `tracing.capture_bodies=false`, bodies are not persisted in traces.
+   Body bytes can still be parsed transiently for model and usage extraction.
+6. If `tracing.capture_bodies=true`, effective PII mode defaults to
+   `redact_storage` when `pii.mode` is empty.
+7. In `redact_storage`, JSON body fields are redacted by key denylist and
+   string detectors (email, phone, SSN, token-like values).
+8. Placeholder values are deterministic hashes scoped by workspace and optional
+   `pii.replacement.hash_salt`.
+9. If storage redaction fails, the gateway drops body persistence for that
+   trace and sets `redaction_storage_drop=true` in metadata.
+10. In `redact_upstream`, request bodies are redacted before forwarding to
+    provider routes.
+11. In `block`, requests are denied when configured detectors find protected
+    content.
+12. Optional `pii.scopes[]` can override mode/policy by org/workspace/key,
+    provider, and route prefix.
+
+Supported `pii.mode` values at runtime:
+- `off`
+- `redact_storage`
+- `redact_upstream`
+- `block`
+
+## Starter privacy profiles
+
+### Metadata-only baseline
+
+```yaml filename="ongoingai.yaml"
+tracing:
+  capture_bodies: false
+  body_max_size: 1048576
+pii:
+  mode: "" # auto resolves to off when body capture is disabled
+```
+
+### Body capture with storage redaction
+
+```yaml filename="ongoingai.yaml"
+tracing:
+  capture_bodies: true
+  body_max_size: 262144
+pii:
+  mode: redact_storage
+  policy_id: default/v1
+  stages:
+    request_headers: true
+    request_body: true
+    response_headers: true
+    response_body: true
+  detectors:
+    email: true
+    phone: true
+    ssn: true
+    token_like: true
+```
+
+## Deployment profiles
+
+- Production default:
+  `capture_bodies=false` with metadata-only traces.
+- Incident window capture:
+  `capture_bodies=true` and `pii.mode=redact_storage` with smaller
+  `body_max_size`.
+- Custom header redaction policy:
+  add keys to `pii.headers.denylist`.
+- Custom body field coverage:
+  tune `pii.body.key_denylist` for domain-specific sensitive keys.
+- Deterministic placeholder stability:
+  set and keep `pii.replacement.hash_salt` consistent across deployments.
+
+## Example policies
+
+### Force metadata-only storage in all environments
+
+```yaml filename="ongoingai.yaml"
+tracing:
+  capture_bodies: false
+pii:
+  mode: off
+```
+
+### Redact JSON keys and token-like values during capture
+
+```yaml filename="ongoingai.yaml"
+tracing:
+  capture_bodies: true
+  body_max_size: 262144
+pii:
+  mode: redact_storage
+  body:
+    key_denylist:
+      - email
+      - phone
+      - password
+      - token
+      - ssn
+      - api_key
+  detectors:
+    email: true
+    phone: true
+    ssn: true
+    token_like: true
+```
+
+### Use a custom placeholder format and stable salt
+
+```yaml filename="ongoingai.yaml"
+pii:
+  mode: redact_storage
+  replacement:
+    format: "[MASK:{type}:{hash}]"
+    hash_salt: REPLACE_WITH_STABLE_SALT
+```
+
+## Validation checks
+
+1. Validate and start the gateway.
+
+   ```bash filename="Terminal A"
+   ongoingai config validate
+   ongoingai serve
+   ```
+
+2. Send one provider request that includes sensitive-like values in Terminal B.
+
+   ```bash filename="Terminal B"
+   curl http://localhost:8080/openai/v1/chat/completions \
+     -H "Authorization: Bearer $OPENAI_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"email alice@example.com and token sk_test_1234567890"}]}'
+   ```
+
+3. Query recent traces and pick one ID.
+
+   ```bash filename="Terminal B"
+   curl "http://localhost:8080/api/traces?limit=1"
+   ```
+
+   If `auth.enabled=true`, include your gateway key header on API reads.
+
+4. Query trace detail.
+
+   ```bash filename="Terminal B"
+   curl "http://localhost:8080/api/traces/TRACE_ID"
+   ```
+
+   Placeholder:
+   - `TRACE_ID`: Trace ID from `/api/traces`.
+
+You should see:
+- `request_headers` and `response_headers` with sensitive keys as `[REDACTED]`.
+- No raw body content when `capture_bodies=false`.
+- Redacted body placeholders when `capture_bodies=true` and
+  `pii.mode=redact_storage`.
+- Metadata fields such as `redaction_mode`, `redaction_applied`,
+  `redaction_counts`, and `redaction_policy_id`.
+
+## Troubleshooting
+
+### Trace body fields are empty when capture is expected
+
+- Symptom: `request_body` and `response_body` are empty.
+- Cause: `tracing.capture_bodies=false`, or redaction failed and storage body
+  persistence was dropped.
+- Fix: Enable `capture_bodies` for controlled windows and check metadata for
+  `redaction_storage_drop`.
+
+### Provider request is denied by PII guardrail mode
+
+- Symptom: Proxied provider requests return `403` or `503` with a guardrail
+  denial message.
+- Cause: `pii.mode=block` detected protected content, or
+  `pii.mode=redact_upstream|block` failed closed due policy-evaluation
+  uncertainty (for example oversized request body or unsupported content type).
+- Fix: Keep request bodies within `tracing.body_max_size`, use JSON/text request
+  body content on guarded routes, or switch to `redact_storage` if you only
+  need storage-stage protection.
+
+Status semantics:
+- `403` means policy detection succeeded and `block` mode denied the request.
+- `503` means policy uncertainty in `redact_upstream` or `block` caused a
+  fail-closed deny.
+
+### Custom header denylist entries are not redacted
+
+- Symptom: Custom header keys appear unchanged in traces.
+- Cause: `pii.stages.request_headers` or `pii.stages.response_headers` is
+  disabled.
+- Fix: Enable the relevant header stage flags and keep the denylist keys set.
+
+### Placeholder hashes vary across environments
+
+- Symptom: Redacted placeholder hashes differ for similar payloads.
+- Cause: Different workspace scope or different `pii.replacement.hash_salt`.
+- Fix: Keep workspace mapping stable and use a consistent hash salt strategy.
+
+## Next steps
+
+- [Privacy model](/gateway/core-concepts/privacy-model)
+- [Tracing and audit logs](/gateway/capabilities/tracing-and-audit-logs)
+- [Security](/gateway/help/security)

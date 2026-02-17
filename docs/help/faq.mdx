@@ -1,0 +1,143 @@
+---
+title: FAQ
+description: Get short, implementation-backed answers to common OngoingAI Gateway operator questions.
+related:
+  title: Next steps
+  description: Continue with troubleshooting, auth policy details, and trace behavior.
+  links:
+    - gateway/help/troubleshooting
+    - gateway/reference/authorization-reference
+    - gateway/reference/rest-api-reference
+---
+
+Use this page for quick answers to common gateway operator questions.
+If you need step-by-step diagnosis, use troubleshooting.
+
+## Credentials and boundary rules
+
+These answers describe implementation behavior in the running gateway.
+
+### Do you store provider API keys?
+
+No. OngoingAI Gateway forwards provider credentials upstream but does not
+persist raw provider key material in the trace store, config store, or gateway
+key store.
+
+Gateway traces store:
+- `api_key_hash` (SHA-256 hash of the provider key)
+- `api_key_last4` in metadata
+- redacted credential headers (`Authorization`, `X-API-Key`) as `[REDACTED]`
+
+### Are gateway keys and provider keys the same thing?
+
+No. They are separate credentials with different purposes.
+
+- Gateway key: identity and authorization for the gateway itself.
+- Provider key: upstream provider credential.
+
+Gateway key behavior:
+- Send in `X-OngoingAI-Gateway-Key` (or your configured `auth.header`).
+- Controls RBAC permissions and tenant scope.
+
+Provider key behavior:
+- Send in `Authorization` or `X-API-Key`.
+- Forwarded to provider proxy routes.
+
+If gateway auth is enabled and you call proxy routes, you must send both keys.
+
+### Can I send the gateway key in Authorization?
+
+No. Gateway auth reads only the configured gateway header.
+If you send the gateway key only in `Authorization`, protected routes return
+`401 missing or invalid gateway key`.
+
+Example:
+
+```bash filename="Terminal"
+curl -i "http://localhost:8080/openai/v1/models" \
+  -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY" \
+  -H "Authorization: Bearer OPENAI_API_KEY"
+```
+
+Placeholders:
+- `GATEWAY_KEY`: Gateway key token with `proxy:write`.
+- `OPENAI_API_KEY`: Upstream provider API key.
+
+## Tracing, privacy, and streams
+
+Use this section to confirm what the gateway stores and what it only forwards.
+
+### What is captured when `tracing.capture_bodies` is false?
+
+Gateway still captures request and response metadata for analytics and audits.
+Gateway does not persist raw request or response bodies.
+
+When `tracing.capture_bodies=false`, traces still include:
+- method, path, status, and latency
+- provider, model, token usage, and estimated cost
+- redacted headers and tenant identity fields
+- stream metadata such as `streaming`, `stream_chunks`, and TTFT fields
+
+`request_body` and `response_body` are stored as empty values.
+
+### Does the gateway support streaming APIs?
+
+Yes. Streaming proxy responses are forwarded as they arrive.
+Trace metadata records stream behavior, including chunk count and
+time-to-first-token (TTFT).
+
+If a stream exceeds `tracing.body_max_size`, captured body data may be
+truncated, but proxy delivery continues.
+
+### What happens to PII when body capture is enabled?
+
+With default config behavior, enabling body capture uses storage redaction
+(`redact_storage`) unless you set a different valid mode.
+
+- Sensitive headers are redacted.
+- Body detectors redact email, phone, SSN, and token-like values.
+- Field-name denylist redacts sensitive JSON keys such as `password` and
+  `api_key`.
+
+Supported runtime PII modes are `off`, `redact_storage`, `redact_upstream`, and
+`block`.
+
+## Storage and key operations
+
+Key lifecycle behavior depends on the active storage and config-store backend.
+
+### When should I switch from SQLite to Postgres?
+
+Use SQLite for a simple local or single-instance deployment.
+Use Postgres when you need shared, central storage and dynamic gateway key
+lifecycle operations.
+
+Switch to Postgres when you need:
+- API-based gateway key create, rotate, and revoke
+- config-store-backed key resolution and refresh
+- tenant-aware key and org/workspace data in a central store
+
+### Why do gateway key lifecycle APIs return `501` in SQLite mode?
+
+SQLite mode uses a static config-store implementation for gateway keys.
+Static stores support listing and verification, but mutation methods are not
+implemented.
+
+`POST /api/gateway-keys`, `POST /api/gateway-keys/:id/rotate`, and
+`DELETE /api/gateway-keys/:id` return `501` until you use a Postgres-backed
+config store.
+
+## Operations
+
+### Where should I start when a request fails?
+
+Use [Troubleshooting](/gateway/help/troubleshooting) first.
+It provides fast triage commands and error-to-fix mappings for startup, proxy,
+auth, trace, and shutdown issues.
+
+## Next steps
+
+- [Troubleshooting](/gateway/help/troubleshooting)
+- [Authorization reference](/gateway/reference/authorization-reference)
+- [REST API reference](/gateway/reference/rest-api-reference)
+- [Config reference](/gateway/reference/config-reference)

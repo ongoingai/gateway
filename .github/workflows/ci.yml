@@ -1,0 +1,141 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        database: [sqlite, postgres]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ongoingai_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ongoingai_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Check formatting
+        if: matrix.database == 'sqlite'
+        run: |
+          unformatted=$(gofmt -l $(find . -name '*.go' -not -path './vendor/*'))
+          if [ -n "$unformatted" ]; then
+            echo "Unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Vet
+        if: matrix.database == 'sqlite'
+        run: go vet ./...
+
+      - name: Test (SQLite)
+        if: matrix.database == 'sqlite'
+        run: make test
+
+      - name: Test (Race)
+        if: matrix.database == 'sqlite'
+        run: go test -race ./...
+
+      - name: Test (Postgres)
+        if: matrix.database == 'postgres'
+        env:
+          ONGOINGAI_TEST_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/ongoingai_test?sslmode=disable
+        run: make test
+
+      - name: Build
+        if: matrix.database == 'sqlite'
+        run: make build
+
+  tenant-isolation-postgres:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: ongoingai_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d ongoingai_test"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test multi-tenant isolation (Postgres)
+        env:
+          ONGOINGAI_TEST_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/ongoingai_test?sslmode=disable
+        run: |
+          go test ./internal/configstore -run 'TestPostgresStoreGatewayKeyTenantIsolation|TestPostgresStoreRLSBlocksCrossTenantUnfilteredQueries|TestPostgresStoreEnforcesTenantForeignKeys' -count=1
+          go test ./internal/trace -run 'TestPostgresStoreRLSBlocksCrossTenantUnfilteredTraceQueries|TestPostgresStoreAnalyticsQueriesTenantIsolation|TestPostgresStoreEnforcesTraceTenantForeignKeys' -count=1
+          go test ./internal/api -run 'TestRouterServesTracesListAndDetail|TestRouterAnalyticsSummaryAndHealth|TestRouterGatewayKeyCRUDAndTenantScope' -count=1
+
+  cross-build-artifacts:
+    runs-on: ubuntu-latest
+    needs: [test-build, tenant-isolation-postgres]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build cross-platform binaries
+        run: make build-cross
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum ongoingai_* > checksums.txt
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ongoingai-cross-build-${{ github.sha }}
+          path: |
+            dist/ongoingai_linux_amd64
+            dist/ongoingai_linux_arm64
+            dist/ongoingai_darwin_amd64
+            dist/ongoingai_darwin_arm64
+            dist/ongoingai_windows_amd64.exe
+            dist/checksums.txt
+          if-no-files-found: error
+          retention-days: 14

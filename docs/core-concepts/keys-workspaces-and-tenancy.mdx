@@ -1,0 +1,113 @@
+---
+title: Keys, workspaces, and tenancy
+description: Learn how gateway keys map to org and workspace scope, and how tenant isolation is enforced.
+related:
+  title: Next steps
+  description: Continue with auth policy and reference details.
+  links:
+    - gateway/capabilities/gateway-auth-rbac-and-key-lifecycle
+    - gateway/reference/authorization-reference
+    - gateway/core-concepts/traces-and-audit-model
+---
+
+Use this page to understand tenant identity and access scope in OngoingAI
+Gateway. It explains how gateway keys map to organization and workspace
+boundaries for proxy and analytics access.
+
+## Choose this model when
+
+- You need strict tenant boundaries in shared AI infrastructure.
+- You need one policy model across proxy, traces, and analytics.
+- You need audit and usage data scoped to the same tenant identity as request
+  forwarding.
+
+## Tenancy hierarchy
+
+1. Organization: top-level tenant boundary.
+2. Workspace: operational boundary inside an organization.
+3. Gateway key: machine credential bound to one workspace and organization.
+
+Each authenticated gateway key carries:
+- `org_id`
+- `workspace_id`
+- `role`
+- optional additive `permissions`
+
+## How scope is assigned on requests
+
+If `auth.enabled=true`, the request flow is:
+
+1. The gateway reads the configured auth header (default:
+   `X-OngoingAI-Gateway-Key`).
+2. The gateway validates the key and resolves key identity
+   (`org_id`, `workspace_id`, key ID, role).
+3. The gateway enforces required permission for the target route.
+4. The gateway attaches tenant identity to request context for downstream trace,
+   analytics, and key-management handlers.
+
+If `auth.enabled=false`, tenant identity is not injected from auth context.
+
+## Workspace-scoped permission model
+
+| Resource | Action | Scope | Required permission |
+|----------|--------|-------|---------------------|
+| `proxy` | `forward` | workspace | `proxy:write` |
+| `traces` | `read` | workspace | `analytics:read` |
+| `analytics` | `read` | workspace | `analytics:read` |
+| `gateway_keys` | `manage` | workspace | `keys:manage` |
+
+`GET /api/health` is public and does not require gateway key auth.
+
+## Default role permissions
+
+- `owner`, `admin`: `proxy:write`, `analytics:read`, `keys:manage`
+- `developer`, `member`: `proxy:write`, `analytics:read`
+- `viewer`: `analytics:read`
+- Unknown roles: no implicit permissions
+
+Custom permissions in key configuration are additive.
+
+## Isolation controls
+
+- API handlers apply org/workspace filters from authenticated identity on trace
+  and analytics queries.
+- Trace detail endpoints deny cross-tenant access by returning not found outside
+  the caller tenant scope.
+- Gateway key management endpoints apply tenant scope to list, create, rotate,
+  and revoke operations.
+- In Postgres mode, tenant foreign keys and row-level security policies add a
+  database safety layer.
+- In SQLite mode, tenant isolation is enforced by gateway query filters and
+  middleware-level scope injection.
+
+## Configuration example
+
+If you enable auth, a key must include org and workspace scope:
+
+```yaml filename="ongoingai.yaml"
+auth:
+  enabled: true
+  header: X-OngoingAI-Gateway-Key
+  keys:
+    - id: team-a-dev-1
+      token: replace-me
+      org_id: org-default
+      workspace_id: workspace-default
+      role: developer
+      permissions:
+        - proxy:write
+        - analytics:read
+```
+
+## Common failure outcomes
+
+- Missing or invalid gateway key: `401` on protected routes.
+- Valid key without required permission: `403`.
+- Missing provider credential on proxy routes: `403`.
+- Unmapped protected API action: `403` deny by default.
+
+## Next steps
+
+- [Configure gateway auth and RBAC lifecycle](/gateway/capabilities/gateway-auth-rbac-and-key-lifecycle)
+- [Review authorization route matrix](/gateway/reference/authorization-reference)
+- [Review trace attribution model](/gateway/core-concepts/traces-and-audit-model)

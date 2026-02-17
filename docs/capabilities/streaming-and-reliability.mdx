@@ -1,0 +1,181 @@
+---
+title: Streaming and reliability
+description: Preserve low-latency streaming pass-through while isolating proxy traffic from trace persistence failures.
+related:
+  title: Next steps
+  description: Continue with tracing details, storage behavior, and troubleshooting.
+  links:
+    - gateway/capabilities/tracing-and-audit-logs
+    - gateway/capabilities/storage-backends-and-migrations
+    - gateway/help/troubleshooting
+---
+
+Use this page to understand streaming behavior and reliability guarantees in
+OngoingAI Gateway.
+It covers streaming metadata capture, backpressure handling, and shutdown
+semantics.
+
+## Reliability goals
+
+- Preserves provider streaming response delivery semantics to clients.
+- Detects server-sent event responses and captures stream metadata.
+- Records stream chunk count and time to first token (TTFT).
+- Uses asynchronous trace writes so proxy forwarding does not wait on storage.
+- Applies bounded trace queue behavior with explicit drop signals under
+  backpressure.
+
+## Operational fit
+
+- You need low-latency streamed responses for client UX.
+- You need predictable behavior when trace storage falls behind.
+- You need operational visibility into stream timing and chunk behavior.
+
+## Stream and trace pipeline
+
+1. Proxy forwards provider traffic directly on matched provider routes.
+2. Streaming detection uses response `Content-Type` containing
+   `text/event-stream`.
+3. Capture middleware counts stream chunks and measures TTFT from handler start
+   to first upstream write.
+4. TTFT is recorded as `time_to_first_token_ms` and `time_to_first_token_us` in
+   trace records.
+5. Trace records enqueue to an asynchronous writer queue (buffer size `1024`).
+6. If the queue is full, the gateway logs
+   `trace queue is full; dropping trace` and continues proxy forwarding.
+7. If persistence fails inside async writes, failures are logged as
+   `trace persistence failed; dropped trace records`.
+8. On shutdown, the gateway tries to flush pending traces within a 5-second
+   timeout and logs the flush outcome.
+
+Streaming payload capture can be truncated by `tracing.body_max_size` for stored
+trace bodies. Truncation affects stored trace content, not client stream
+delivery.
+
+## Recommended baseline
+
+No separate feature flag is required. Streaming behavior is available on normal
+provider routes.
+
+Recommended baseline:
+
+```yaml filename="ongoingai.yaml"
+tracing:
+  capture_bodies: false
+  body_max_size: 1048576
+```
+
+With `capture_bodies=false`, stream bodies are not stored, but stream TTFT and
+chunk metadata are still captured.
+
+## Deployment patterns
+
+- Lowest overhead streaming telemetry:
+  keep `capture_bodies=false`.
+- Incident debugging window:
+  set `capture_bodies=true` with a reduced `body_max_size`.
+- High-throughput environments:
+  monitor logs for queue saturation and persistence failure signals.
+
+## Example checks
+
+### Validate TTFT and chunk metrics on an SSE endpoint
+
+1. Start the gateway in Terminal A.
+
+   ```bash filename="Terminal A"
+   ongoingai config validate
+   ongoingai serve
+   ```
+
+2. Send a streaming request in Terminal B.
+
+   ```bash filename="Terminal B"
+   curl -N http://localhost:8080/openai/v1/chat/completions \
+     -H "Authorization: Bearer $OPENAI_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"gpt-4o-mini","stream":true,"messages":[{"role":"user","content":"Reply with ok"}]}'
+   ```
+
+   Placeholder:
+   - `OPENAI_API_KEY`: Your upstream provider API key.
+
+3. Query recent traces in Terminal B.
+
+   ```bash filename="Terminal B"
+   curl "http://localhost:8080/api/traces?limit=5"
+   ```
+
+You should see streamed response chunks in the client output and non-zero
+`time_to_first_token_ms` for streamed traces.
+
+### Observe queue-pressure behavior safely in staging
+
+Generate sustained proxy traffic while storage is constrained, then monitor
+gateway logs for:
+- `trace queue is full; dropping trace`
+- `trace persistence failed; dropped trace records`
+
+Proxy request forwarding should continue while these warnings appear.
+
+## Validation checklist
+
+1. Send one non-stream request and one stream request through provider routes.
+2. Query trace summaries:
+
+   ```bash filename="Terminal"
+   curl "http://localhost:8080/api/traces?limit=10"
+   ```
+
+3. Query one stream trace detail:
+
+   ```bash filename="Terminal"
+   curl "http://localhost:8080/api/traces/TRACE_ID"
+   ```
+
+   Placeholder:
+   - `TRACE_ID`: ID of a streamed trace from `/api/traces`.
+
+You should see:
+- Stream traces with non-zero `time_to_first_token_ms`.
+- Stream traces with `stream_chunks` metadata in `metadata`.
+- Proxy responses continuing during trace-write warnings under load.
+
+## Troubleshooting
+
+### Stream traces show zero TTFT
+
+- Symptom: `time_to_first_token_ms` is `0` for expected streaming traffic.
+- Cause: Upstream response was not SSE (`text/event-stream`), or the request was
+  not streamed.
+- Fix: Confirm provider request includes stream mode and upstream returns SSE.
+
+### Logs show `trace queue is full; dropping trace`
+
+- Symptom: Trace drops appear during high traffic.
+- Cause: Async trace queue reached capacity while storage writes lag.
+- Fix: Reduce capture load, improve storage throughput, and monitor queue-drop
+  frequency.
+
+### Logs show `trace persistence failed; dropped trace records`
+
+- Symptom: Persistence failure logs appear with failed batch counts.
+- Cause: Trace store writes are failing.
+- Fix: Verify storage connectivity and health, then confirm failures stop.
+
+### Gateway shutdown logs trace flush timeout
+
+- Symptom: Logs show failed flush before shutdown.
+- Cause: Pending trace writes exceeded the 5-second shutdown window.
+- Fix: Allow graceful shutdown time and verify storage responsiveness.
+
+### Proxy returns `502 upstream request failed`
+
+- Symptom: Stream or non-stream proxy requests return `502`.
+- Cause: Upstream provider request failed before completion.
+- Fix: Verify provider endpoint health and network reachability.
+
+## Next steps
+
+- [Tracing and audit logs](/gateway/capabilities/tracing-and-audit-logs)
+- [Storage backends and migrations](/gateway/capabilities/storage-backends-and-migrations)
+- [Troubleshooting](/gateway/help/troubleshooting)

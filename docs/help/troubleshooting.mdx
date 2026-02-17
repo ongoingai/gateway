@@ -1,0 +1,206 @@
+---
+title: Troubleshooting
+description: Diagnose startup, proxy, auth, trace, and reliability issues in OngoingAI Gateway.
+related:
+  title: Next steps
+  description: Continue with API details, auth policy mapping, and config validation.
+  links:
+    - gateway/reference/rest-api-reference
+    - gateway/reference/authorization-reference
+    - gateway/reference/config-reference
+---
+
+Use this page to diagnose common gateway failures quickly.
+Each issue uses the same format: symptom, cause, and fix.
+
+## Fast triage flow
+
+Run the following checks in order before you debug individual endpoints.
+
+1. Validate config before restart:
+
+   ```bash filename="Terminal"
+   ongoingai config validate --config ongoingai.yaml
+   ```
+
+2. Start the gateway and keep logs visible:
+
+   ```bash filename="Terminal"
+   ongoingai serve --config ongoingai.yaml
+   ```
+
+3. Verify service health:
+
+   ```bash filename="Terminal"
+   curl -i "http://localhost:8080/api/health"
+   ```
+
+4. Send one proxied provider request:
+
+   ```bash filename="Terminal"
+   curl -i "http://localhost:8080/openai/v1/chat/completions" \
+     -H "Authorization: Bearer OPENAI_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Reply with ok"}]}'
+   ```
+
+5. Check trace capture:
+
+   ```bash filename="Terminal"
+   curl -i "http://localhost:8080/api/traces?limit=1"
+   ```
+
+## Startup failures
+
+### `config is invalid: ...`
+
+- Symptom: `ongoingai serve` exits immediately with a config validation
+  message.
+- Cause: One or more config fields fail validation.
+- Fix: Run `ongoingai config validate --config ongoingai.yaml`, then correct
+  the reported field.
+
+### `failed to initialize sqlite storage: ...`
+
+- Symptom: Startup fails before the server begins listening.
+- Cause: SQLite path is invalid or not writable.
+- Fix: Set a writable `storage.path` and verify directory permissions.
+
+### `failed to initialize postgres storage: ...`
+
+- Symptom: Startup fails with Postgres initialization errors.
+- Cause: `storage.dsn` is invalid, or database connectivity is unavailable.
+- Fix: Verify DSN format, network reachability, and database credentials.
+
+### Gateway fails to bind host and port
+
+- Symptom: Startup logs show `gateway failed` with listen errors.
+- Cause: Configured host or port is unavailable.
+- Fix: Free the port, or update `server.host` and `server.port`.
+
+## Proxy and provider issues
+
+### Proxy returns `502 upstream request failed`
+
+- Symptom: Provider route responses return `502` with body
+  `upstream request failed`.
+- Cause: Upstream provider is unavailable or unreachable.
+- Fix: Verify provider upstream URL, DNS, outbound network path, and
+  provider service status.
+
+### Proxy returns `403` for missing provider credential
+
+- Symptom: Error says provider API key is missing.
+- Cause: Gateway auth passed, but request did not include provider key.
+- Fix: Add `Authorization` or `X-API-Key` header with provider token.
+
+### Proxy route returns `404 page not found`
+
+- Symptom: Request to expected provider route returns `404`.
+- Cause: Request path does not match configured provider prefixes.
+- Fix: Check `providers.openai.prefix` and `providers.anthropic.prefix`,
+  then update client base URLs.
+
+## Authorization issues
+
+### Protected routes return `401 missing or invalid gateway key`
+
+- Symptom: API or proxy route rejects request with `401`.
+- Cause: Gateway key is missing, invalid, or sent in the wrong header.
+- Fix: Send key in configured `auth.header`
+  (default `X-OngoingAI-Gateway-Key`).
+
+### Protected routes return `403 gateway key does not have required permission`
+
+- Symptom: Request is authenticated but blocked by policy.
+- Cause: Key role and permissions do not include required permission.
+- Fix: Use a key with route-required permission
+  (`proxy:write`, `analytics:read`, or `keys:manage`).
+
+### Protected routes return `503 gateway key verification unavailable`
+
+- Symptom: Requests intermittently fail with key verification errors.
+- Cause: Dynamic key resolver is unavailable or stale fail-closed behavior
+  is active in Postgres mode.
+- Fix: Restore config-store connectivity and verify key refresh logs.
+
+## Traces and analytics issues
+
+### `/api/traces` returns no items
+
+- Symptom: Trace list is empty after testing.
+- Cause: Request did not pass provider routes, or no successful provider
+  traffic has been captured yet.
+- Fix: Send traffic through `/openai/...` or `/anthropic/...`, then query
+  `/api/traces?limit=10` again.
+
+### `/api/traces` returns `400` for query filters
+
+- Symptom: Trace list request fails with validation errors.
+- Cause: Invalid filter values (for example `limit`, `status`,
+  `min_tokens`, `max_tokens`, `from`, `to`, or `cursor`).
+- Fix: Use supported ranges and time formats. Ensure `to >= from` and
+  `max_tokens >= min_tokens`.
+
+### `/api/analytics/*` returns `400` for series options
+
+- Symptom: Usage or cost analytics request fails with query validation
+  errors.
+- Cause: Unsupported `group_by` or `bucket`, or invalid date range.
+- Fix: Use `group_by=provider|model` and `bucket=hour|day|week`.
+  Ensure `to >= from`.
+
+### `/api/traces/:id` returns `404 trace not found` for known ID
+
+- Symptom: Trace detail is missing for a trace seen by another caller.
+- Cause: Tenant scoping hides traces outside caller `org_id` and
+  `workspace_id`.
+- Fix: Query with a gateway key in the same tenant scope as the trace.
+
+## Gateway key management issues
+
+### Gateway key create, rotate, or revoke returns `501`
+
+- Symptom: Key lifecycle route returns not implemented.
+- Cause: Active config store does not support key mutations.
+- Fix: Use Postgres-backed key store for key lifecycle APIs.
+
+### Gateway key create or rotate returns `409`
+
+- Symptom: Key mutation fails with conflict.
+- Cause: Key ID already exists, or rotated token conflicts with an existing
+  key token.
+- Fix: Use a unique ID or token, then retry.
+
+### Gateway key mutation returns `400 invalid json body`
+
+- Symptom: Create or rotate request fails with JSON body error.
+- Cause: Request body is invalid JSON.
+- Fix: Send valid JSON with `Content-Type: application/json`.
+
+## Reliability and shutdown
+
+### Logs show `trace queue is full; dropping trace`
+
+- Symptom: Warning logs appear under high traffic.
+- Cause: Async trace queue is saturated while storage writes lag.
+- Fix: Reduce capture load, improve storage throughput, and monitor warning
+  frequency.
+
+### Logs show `trace persistence failed; dropped trace records`
+
+- Symptom: Error logs report failed trace write batches.
+- Cause: Trace store write failures in async writer.
+- Fix: Verify storage health and connectivity, then confirm errors stop.
+
+### Logs show `failed to flush pending traces before shutdown`
+
+- Symptom: Shutdown logs report flush timeout or cancellation.
+- Cause: Pending trace writes exceeded shutdown flush window.
+- Fix: Allow graceful shutdown time and verify storage responsiveness.
+
+## Next steps
+
+- [REST API reference](/gateway/reference/rest-api-reference)
+- [Authorization reference](/gateway/reference/authorization-reference)
+- [Config reference](/gateway/reference/config-reference)

@@ -1,0 +1,139 @@
+---
+title: Install
+description: Install OngoingAI Gateway with the install script, Docker image, or source build.
+related:
+  title: Next steps
+  description: Continue with first traffic validation and lifecycle planning.
+  links:
+    - gateway/get-started/quickstart
+    - gateway/get-started/upgrade-and-compatibility
+    - gateway/reference/config-reference
+---
+
+Use this page to install OngoingAI Gateway and verify the binary works.
+
+## Pick an installation path
+
+Start with the install script unless you need containerized runtime boundaries
+or custom build outputs.
+
+- Use the install script for the fastest setup on a local machine.
+- Use Docker when you want a container runtime.
+- Build from source when you need to contribute or customize builds.
+
+## Prerequisites
+
+- For script install, you must have `curl`.
+- For Docker install, you must have Docker.
+- For source builds, you must have Go `1.24+` and `make`.
+
+## Install with the script
+
+1. Run the installer.
+
+   ```bash filename="Terminal"
+   curl -sSL https://ongoingai.dev/install.sh | sh
+   ```
+
+2. Verify the installed binary.
+
+   ```bash filename="Terminal"
+   ongoingai version
+   ```
+
+   You should see a version string.
+
+If you need to pin a version or change install behavior, set these variables
+before step 1:
+
+| Variable | Purpose |
+|---|---|
+| `ONGOINGAI_VERSION` | Install a specific release instead of `latest`. |
+| `ONGOINGAI_INSTALL_DIR` | Install to a custom directory instead of `/usr/local/bin`. |
+| `ONGOINGAI_INSTALL_BASE_URL` | Download from a custom release base URL. |
+
+## Install with Docker
+
+1. Pull the image.
+
+   ```bash filename="Terminal"
+   docker pull ghcr.io/ongoingai/gateway:latest
+   ```
+
+2. Verify the container image.
+
+   ```bash filename="Terminal"
+   docker run --rm ghcr.io/ongoingai/gateway:latest version
+   ```
+
+   You should see a version string.
+
+## Build from source
+
+1. Clone the repository and build.
+
+   ```bash filename="Terminal"
+   git clone https://github.com/ongoingai/gateway.git
+   cd gateway
+   make build
+   ```
+
+2. Verify the built binary.
+
+   ```bash filename="Terminal"
+   ./bin/ongoingai version
+   ```
+
+   You should see a version string.
+
+The build writes the binary to `./bin/ongoingai`.
+
+### Build release targets
+
+If you need release binaries for multiple platforms, run:
+
+```bash filename="Terminal"
+make build-cross
+```
+
+Build outputs are written to `./dist/`.
+
+## Default runtime behavior
+
+After install, the gateway uses these defaults:
+
+- Storage driver: SQLite at `./data/ongoingai.db`
+- Provider route prefixes: `/openai` and `/anthropic`
+- Body capture: off (`tracing.capture_bodies=false`)
+
+See the [configuration reference](/gateway/reference/config-reference) for all
+available settings.
+
+## Troubleshooting
+
+### `ongoingai` command is not found after script install
+
+- Symptom: shell returns `command not found: ongoingai`.
+- Cause: install directory is not in your `PATH`.
+- Fix: add the install directory to `PATH` (default: `/usr/local/bin`), then
+  start a new shell session.
+
+### Script install fails with a permission error
+
+- Symptom: installer cannot write the target binary.
+- Cause: your user cannot write to the install directory.
+- Fix: set `ONGOINGAI_INSTALL_DIR` to a writable directory, or install with a
+  user that can write to `/usr/local/bin`.
+
+### Source build fails with a Go toolchain error
+
+- Symptom: `make build` fails with version or module errors.
+- Cause: local Go version is below `1.24`.
+- Fix: upgrade Go, then rerun `make build`.
+
+## Next steps
+
+- [Run the Quickstart](/gateway/get-started/quickstart) to send first traffic
+  through the gateway and verify traces.
+- [Review upgrade and compatibility](/gateway/get-started/upgrade-and-compatibility)
+  for rollout planning.

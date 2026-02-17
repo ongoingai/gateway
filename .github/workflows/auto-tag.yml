@@ -1,0 +1,62 @@
+name: Auto Tag
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    types:
+      - completed
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-tag-main
+  cancel-in-progress: false
+
+jobs:
+  tag-main:
+    if: >
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout triggering commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: Fetch tags
+        run: git fetch --force --tags
+
+      - name: Check existing tag on commit
+        id: existing
+        shell: bash
+        run: |
+          tag="$(git tag --points-at "${{ github.event.workflow_run.head_sha }}" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
+          if [[ -n "${tag}" ]]; then
+            echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+            echo "commit already tagged as ${tag}; skipping"
+          fi
+
+      - name: Compute next tag
+        if: steps.existing.outputs.tag == ''
+        id: next
+        shell: bash
+        run: |
+          next_tag="$(scripts/release/next_tag.sh)"
+          echo "tag=${next_tag}" >> "${GITHUB_OUTPUT}"
+          echo "next tag: ${next_tag}"
+
+      - name: Create and push tag
+        if: steps.existing.outputs.tag == ''
+        shell: bash
+        run: |
+          tag="${{ steps.next.outputs.tag }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "${tag}" "${{ github.event.workflow_run.head_sha }}" -m "Release ${tag}"
+          git push origin "${tag}"

@@ -1,0 +1,216 @@
+---
+title: Gateway auth, RBAC, and key lifecycle
+description: Require gateway key authentication on protected routes, enforce role and permission policy, and manage gateway keys by tenant scope.
+related:
+  title: Next steps
+  description: Continue with tenancy, authorization policy, and API details.
+  links:
+    - gateway/core-concepts/keys-workspaces-and-tenancy
+    - gateway/reference/authorization-reference
+    - gateway/reference/rest-api-reference
+---
+
+Use this page to enable gateway key auth and enforce RBAC on proxy and API
+routes. It also covers gateway key lifecycle endpoints and operational behavior
+in static and Postgres-backed modes.
+
+## Access model
+
+- Requires gateway key authentication on protected routes.
+- Maps routes to required permissions (`proxy:write`, `analytics:read`,
+  `keys:manage`).
+- Applies role defaults with optional additive custom permissions.
+- Strips the gateway auth header before proxy forwarding.
+- Exposes gateway key list, create, revoke, and rotate APIs.
+- Emits audit logs for auth denies and key lifecycle actions.
+
+## Operational fit
+
+- You need machine-to-machine access control for shared gateway deployments.
+- You need least-privilege access between proxy traffic and analytics reads.
+- You need auditable gateway key lifecycle operations by workspace scope.
+
+## Authorization lifecycle
+
+1. Middleware resolves required access from route and method.
+2. Protected routes require the configured gateway key header.
+3. Middleware authenticates the key and resolves identity
+   (`org_id`, `workspace_id`, role, key ID).
+4. Middleware enforces required permission for the target route.
+5. For provider routes, middleware also requires provider credentials
+   (`Authorization` or `X-API-Key`).
+6. Middleware removes the gateway key header before upstream forwarding.
+7. API handlers apply tenant scope to traces, analytics, and gateway key
+   management.
+8. If auth is enabled in Postgres mode, active keys refresh in-memory every
+   30 seconds. If the cache is older than 60 seconds, protected routes fail
+   closed with `503`.
+
+Permission mapping:
+- `/openai/*` and `/anthropic/*`: `proxy:write`
+- `GET /api/traces` and `GET /api/traces/:id`: `analytics:read`
+- `GET /api/analytics/*`: `analytics:read`
+- `GET/POST/DELETE /api/gateway-keys*`: `keys:manage`
+- `GET /api/health`: public
+
+Role defaults:
+- `owner`, `admin`: `proxy:write`, `analytics:read`, `keys:manage`
+- `developer`, `member`: `proxy:write`, `analytics:read`
+- `viewer`: `analytics:read`
+- Unknown roles: no implicit permissions
+
+## Starter policy config
+
+```yaml filename="ongoingai.yaml"
+auth:
+  enabled: true
+  header: X-OngoingAI-Gateway-Key
+  keys:
+    - id: team-a-owner-1
+      token: replace-me-owner
+      org_id: org-default
+      workspace_id: workspace-default
+      role: owner
+    - id: team-a-viewer-1
+      token: replace-me-viewer
+      org_id: org-default
+      workspace_id: workspace-default
+      role: viewer
+```
+
+If `auth.enabled=true`, proxy requests must include both:
+- Gateway key header (default: `X-OngoingAI-Gateway-Key`)
+- Provider credential header (`Authorization` or `X-API-Key`)
+
+## Deployment patterns
+
+- Use static YAML keys for local and single-team deployments.
+- Use Postgres-backed config store for key lifecycle APIs in team mode.
+- Set a custom gateway auth header with `auth.header` when your edge stack
+  reserves default header names.
+- Add explicit `permissions` to grant exceptions beyond role defaults.
+
+## Worked examples
+
+### Create a viewer key for analytics-only access
+
+```yaml filename="ongoingai.yaml"
+auth:
+  enabled: true
+  header: X-OngoingAI-Gateway-Key
+  keys:
+    - id: team-a-dev-1
+      token: replace-me
+      org_id: org-default
+      workspace_id: workspace-default
+      role: viewer
+      permissions:
+        - analytics:read
+```
+
+### Manage keys with lifecycle APIs in Postgres mode
+
+```yaml filename="ongoingai.yaml"
+storage:
+  driver: postgres
+  dsn: postgres://USER:PASSWORD@HOST:5432/DB?sslmode=disable
+
+auth:
+  enabled: true
+  header: X-OngoingAI-Gateway-Key
+```
+
+```bash filename="Terminal"
+curl -X POST "http://localhost:8080/api/gateway-keys" \
+  -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY_OWNER" \
+  -H "Content-Type: application/json" \
+  -d '{"id":"team-a-dev-2","role":"developer","permissions":["proxy:write","analytics:read"]}'
+```
+
+The create response includes the key `token`. Store that token securely.
+
+## Verification steps
+
+1. Validate config.
+
+   ```bash filename="Terminal"
+   ongoingai config validate
+   ```
+
+2. Start the gateway.
+
+   ```bash filename="Terminal"
+   ongoingai serve
+   ```
+
+3. Check that protected routes reject missing keys.
+
+   ```bash filename="Terminal"
+   curl -i "http://localhost:8080/api/traces?limit=1"
+   ```
+
+4. Check that viewer keys cannot proxy provider requests.
+
+   ```bash filename="Terminal"
+   curl -i "http://localhost:8080/openai/v1/models" \
+     -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY_VIEWER" \
+     -H "Authorization: Bearer OPENAI_API_KEY"
+   ```
+
+5. Check that owner keys can read and manage key inventory.
+
+   ```bash filename="Terminal"
+   curl -i "http://localhost:8080/api/gateway-keys" \
+     -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY_OWNER"
+   ```
+
+Placeholders:
+- `GATEWAY_KEY_OWNER`: Key token with `keys:manage` permission.
+- `GATEWAY_KEY_VIEWER`: Key token with `analytics:read` only.
+- `OPENAI_API_KEY`: Upstream provider API key.
+
+You should see:
+- `401` with `missing or invalid gateway key` when no key is present.
+- `403` with `gateway key does not have required permission` for viewer proxy
+  attempts.
+- `200` from `/api/gateway-keys` when the caller has `keys:manage`.
+
+## Troubleshooting
+
+### Protected routes return `401`
+
+- Symptom: Response error is `missing or invalid gateway key`.
+- Cause: Gateway key is missing, invalid, or sent in the wrong header.
+- Fix: Send the key in `auth.header` (default:
+  `X-OngoingAI-Gateway-Key`).
+
+### Proxy routes return `403` for permission
+
+- Symptom: Response error is `gateway key does not have required permission`.
+- Cause: Key role or explicit permissions do not include `proxy:write`.
+- Fix: Use a key with `proxy:write`, or update role/permissions.
+
+### Proxy routes return `403` for provider credentials
+
+- Symptom: Response error says provider API key is missing.
+- Cause: Gateway key is valid, but no upstream provider credential was sent.
+- Fix: Add `Authorization` or `X-API-Key` to proxy requests.
+
+### Key create, revoke, or rotate returns `501`
+
+- Symptom: Lifecycle endpoint returns `not implemented`.
+- Cause: Static config store does not support key mutations.
+- Fix: Use `storage.driver=postgres` and set `storage.dsn`, then restart.
+
+### Protected routes return `503`
+
+- Symptom: Response error is `gateway key verification unavailable`.
+- Cause: In Postgres mode, key refresh failed and auth cache became stale.
+- Fix: Restore Postgres connectivity and key-store health, then verify refresh
+  logs.
+
+## Next steps
+
+- [Keys, workspaces, and tenancy](/gateway/core-concepts/keys-workspaces-and-tenancy)
+- [Authorization reference](/gateway/reference/authorization-reference)
+- [REST API reference](/gateway/reference/rest-api-reference)

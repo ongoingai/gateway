@@ -1,0 +1,365 @@
+---
+title: REST API reference
+description: Query health, traces, analytics, and gateway keys with the OngoingAI Gateway HTTP API.
+related:
+  title: Next steps
+  description: Continue with auth policy details, tracing behavior, and configuration.
+  links:
+    - gateway/reference/authorization-reference
+    - gateway/capabilities/tracing-and-audit-logs
+    - gateway/reference/config-reference
+---
+
+Use this page to integrate with OngoingAI Gateway API routes under `/api/...`.
+It covers auth requirements, query validation, and response shapes.
+
+## What this API includes
+
+- Included: service metadata, health, traces, analytics, and gateway key
+  management endpoints.
+- Not included: provider proxy pass-through routes (`/openai/...`,
+  `/anthropic/...`).
+- Canonical schema file:
+  `openapi/openapi.yaml`
+
+Read this page as the runtime contract for client integrations and automation
+jobs.
+
+## Base URL and data formats
+
+- Local default base URL: `http://localhost:8080`
+- Request and response content type: `application/json`
+- Timestamps in responses use RFC3339 format in UTC.
+- Date query fields accept:
+  - RFC3339 (for example `2026-02-12T15:04:05Z`)
+  - Date-only `YYYY-MM-DD`
+
+When you pass `to` as date-only format, the API treats it as end-of-day UTC.
+
+## Authentication and permissions
+
+If `auth.enabled=false`, API routes are accessible without a gateway key.
+
+If `auth.enabled=true`, the permission matrix is:
+
+| Route pattern | Permission |
+| --- | --- |
+| `/api/health` | Public |
+| `/api/traces`, `/api/traces/:id`, `/api/traces/:id/replay`, `/api/traces/:id/fork` | `analytics:read` |
+| `/api/analytics/*` | `analytics:read` |
+| `/api/gateway-keys*` | `keys:manage` |
+
+Gateway key header default: `X-OngoingAI-Gateway-Key`.
+If you customize `auth.header`, send that header instead.
+
+## CORS and preflight
+
+All `/api/...` routes return:
+- `Access-Control-Allow-Origin: *`
+- `Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS`
+- `Access-Control-Allow-Headers` including:
+  `Content-Type`, `Authorization`, `X-API-Key`,
+  `X-OngoingAI-Gateway-Key`, and your custom auth header if configured.
+
+`OPTIONS` preflight requests return `204 No Content`.
+
+## Error response model
+
+Most error responses use:
+
+```json filename="Response"
+{
+  "error": "message"
+}
+```
+
+Common auth-related responses when `auth.enabled=true`:
+- `401`: `missing or invalid gateway key`
+- `403`: `gateway key does not have required permission`
+- `503`: `gateway key verification unavailable`
+
+## Endpoint contracts
+
+### Root and health
+
+| Method | Path | Auth | Success |
+| --- | --- | --- | --- |
+| `GET` | `/` | Public | `200` service metadata |
+| `GET` | `/api/health` | Public | `200` health summary |
+
+`GET /` response fields:
+- `name`
+- `version`
+- `status`
+
+`GET /api/health` response fields:
+- `status`
+- `version`
+- `uptime_sec`
+- `storage_driver`
+- `trace_count`
+- `db_size_bytes` (present for SQLite when file metadata is available)
+
+Example:
+
+```bash filename="Terminal"
+curl http://localhost:8080/
+curl http://localhost:8080/api/health
+```
+
+### Traces
+
+| Method | Path | Auth | Success |
+| --- | --- | --- | --- |
+| `GET` | `/api/traces` | `analytics:read` when auth is enabled | `200` paginated trace list |
+| `GET` | `/api/traces/:id` | `analytics:read` when auth is enabled | `200` trace detail |
+| `GET` | `/api/traces/:id/replay` | `analytics:read` when auth is enabled | `200` replay checkpoints and target state |
+| `POST` | `/api/traces/:id/fork` | `analytics:read` when auth is enabled | `200` fork lineage headers |
+
+`GET /api/traces` query parameters:
+
+| Parameter | Type | Constraints | Notes |
+| --- | --- | --- | --- |
+| `trace_group_id` | string | Optional | Trace lineage group correlation filter. |
+| `thread_id` | string | Optional | Trace lineage thread correlation filter. |
+| `run_id` | string | Optional | Trace lineage run correlation filter. |
+| `provider` | string | Optional | Provider filter. |
+| `model` | string | Optional | Model filter. |
+| `api_key_hash` | string | Optional | API key hash filter. |
+| `status` | int | `100` to `599` | Response status filter. |
+| `min_tokens` | int | `0` to `10000000` | Minimum total tokens. |
+| `max_tokens` | int | `0` to `10000000` | Maximum total tokens. |
+| `from` | date-time or `YYYY-MM-DD` | Optional | Start time filter. |
+| `to` | date-time or `YYYY-MM-DD` | Optional | End time filter. |
+| `limit` | int | `0` to `200` | `0` or omitted uses store default page size (`50`). |
+| `cursor` | string | Optional | Cursor from `next_cursor`. |
+
+Validation rules:
+- `max_tokens` must be greater than or equal to `min_tokens` when both are set.
+- `to` must be greater than or equal to `from`.
+- Invalid cursor returns `400`.
+
+`GET /api/traces` response:
+- `items`: array of trace summary objects.
+- `next_cursor`: present when more results are available.
+
+`GET /api/traces/:id` response includes detail fields:
+- Summary fields from list output.
+- `trace_group_id`
+- `lineage`:
+  - `group_id`
+  - `thread_id`
+  - `run_id`
+  - `checkpoint_id`
+  - `parent_checkpoint_id`
+  - `checkpoint_seq`
+  - `immutable`
+- `request_headers`
+- `request_body`
+- `response_headers`
+- `response_body`
+- `metadata`
+
+`GET /api/traces/:id/replay` query parameters:
+
+| Parameter | Type | Constraints | Notes |
+| --- | --- | --- | --- |
+| `checkpoint_id` | string | Optional | Target checkpoint to inspect. Defaults to `:id`. |
+| `thread_id` | string | Optional | Override lineage thread scope. |
+| `run_id` | string | Optional | Override lineage run scope. |
+| `limit` | int | `0` to `500` | Max checkpoints scanned. `0` or omitted defaults to `200`. |
+
+`GET /api/traces/:id/replay` response fields:
+- `source_trace_id`
+- `target_checkpoint_id`
+- `lineage` (group/thread/run/checkpoint context for target state)
+- `checkpoints` (chronological checkpoint summaries up to target)
+- `truncated` (true when history was capped by `limit`)
+- `target_trace` (trace detail payload for the target checkpoint)
+
+`POST /api/traces/:id/fork` request body fields:
+- `checkpoint_id` (optional, defaults to `:id`)
+- `thread_id` (optional override)
+- `run_id` (optional override; generated when omitted)
+
+`POST /api/traces/:id/fork` response fields:
+- `fork_id`
+- `source_trace_id`
+- `source_checkpoint_id`
+- `lineage` (group/thread/run + parent checkpoint + next checkpoint sequence)
+- `headers` (lineage headers to send on the next proxied debug run request)
+
+Tenant scope behavior:
+- If auth identity is present, list and detail reads are scoped to that
+  identity's `org_id` and `workspace_id`.
+- A trace outside tenant scope returns `404 trace not found`.
+
+Example:
+
+```bash filename="Terminal"
+curl "http://localhost:8080/api/traces?provider=openai&status=200&limit=10" \
+  -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
+
+curl "http://localhost:8080/api/traces/TRACE_ID" \
+  -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
+```
+
+Placeholders:
+- `GATEWAY_KEY`: Gateway key token with `analytics:read`.
+- `TRACE_ID`: Trace ID returned from `/api/traces`.
+
+### Analytics
+
+| Method | Path | Auth | Success |
+| --- | --- | --- | --- |
+| `GET` | `/api/analytics/usage` | `analytics:read` when auth is enabled | `200` usage summary or series |
+| `GET` | `/api/analytics/cost` | `analytics:read` when auth is enabled | `200` cost summary or series |
+| `GET` | `/api/analytics/models` | `analytics:read` when auth is enabled | `200` model stats |
+| `GET` | `/api/analytics/keys` | `analytics:read` when auth is enabled | `200` API key stats |
+| `GET` | `/api/analytics/summary` | `analytics:read` when auth is enabled | `200` merged analytics summary |
+
+Shared analytics query parameters:
+
+| Parameter | Type | Constraints | Notes |
+| --- | --- | --- | --- |
+| `from` | date-time or `YYYY-MM-DD` | Optional | Start time filter. |
+| `to` | date-time or `YYYY-MM-DD` | Optional | End time filter. |
+| `provider` | string | Optional | Provider filter. |
+| `model` | string | Optional | Model filter. |
+
+Series options for `/api/analytics/usage` and `/api/analytics/cost`:
+
+| Parameter | Type | Constraints | Notes |
+| --- | --- | --- | --- |
+| `group_by` | string | `provider`, `model`, or empty | Enables series mode. |
+| `bucket` | string | `hour`, `day`, `week`, or empty | Enables series mode. |
+
+Series behavior:
+- If both `group_by` and `bucket` are empty, endpoint returns summary shape.
+- If either is set, endpoint returns series shape.
+- If series mode is enabled and `bucket` is empty, bucket defaults to `day`.
+
+`GET /api/analytics/summary` response fields:
+- `total_requests`
+- `total_input_tokens`
+- `total_output_tokens`
+- `total_tokens`
+- `total_cost_usd`
+- `active_keys`
+- `top_model`
+
+Example:
+
+```bash filename="Terminal"
+curl "http://localhost:8080/api/analytics/summary?from=2026-02-01&to=2026-02-14" \
+  -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
+
+curl "http://localhost:8080/api/analytics/usage?group_by=provider&bucket=day" \
+  -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
+```
+
+### Gateway keys
+
+| Method | Path | Auth | Success |
+| --- | --- | --- | --- |
+| `GET` | `/api/gateway-keys` | `keys:manage` when auth is enabled | `200` key list |
+| `POST` | `/api/gateway-keys` | `keys:manage` when auth is enabled | `201` key with token |
+| `DELETE` | `/api/gateway-keys/:id` | `keys:manage` when auth is enabled | `204` no body |
+| `POST` | `/api/gateway-keys/:id/rotate` | `keys:manage` when auth is enabled | `200` key with new token |
+
+Create request body fields:
+- `id`
+- `token`
+- `org_id`
+- `workspace_id`
+- `name`
+- `description`
+- `role`
+- `permissions`
+
+Create behavior:
+- If `id` is empty, API generates one (`gk_...`).
+- If `token` is empty, API generates one (`ogk_...`).
+- If auth identity exists, request tenant scope overrides `org_id` and
+  `workspace_id` in body.
+- If auth identity does not exist, empty `org_id` and `workspace_id` default to
+  `default`.
+
+Rotate request body fields:
+- `token` (optional; API generates a new token when omitted)
+
+Tenant scope behavior:
+- List, revoke, and rotate operations apply tenant filter from auth identity
+  when present.
+
+Example:
+
+```bash filename="Terminal"
+curl "http://localhost:8080/api/gateway-keys" \
+  -H "X-OngoingAI-Gateway-Key: ADMIN_KEY"
+
+curl -X POST "http://localhost:8080/api/gateway-keys" \
+  -H "Content-Type: application/json" \
+  -H "X-OngoingAI-Gateway-Key: ADMIN_KEY" \
+  -d '{"name":"CI key","role":"developer","permissions":["proxy:write","analytics:read"]}'
+
+curl -X POST "http://localhost:8080/api/gateway-keys/KEY_ID/rotate" \
+  -H "X-OngoingAI-Gateway-Key: ADMIN_KEY"
+
+curl -X DELETE "http://localhost:8080/api/gateway-keys/KEY_ID" \
+  -H "X-OngoingAI-Gateway-Key: ADMIN_KEY"
+```
+
+Placeholders:
+- `ADMIN_KEY`: Gateway key token with `keys:manage`.
+- `KEY_ID`: Gateway key ID returned by list or create.
+
+## Status code guide
+
+| Code | Meaning |
+| --- | --- |
+| `200` | Successful read or rotate action. |
+| `201` | Gateway key created. |
+| `204` | No-content success (delete or preflight). |
+| `400` | Invalid query or invalid JSON body. |
+| `401` | Missing or invalid gateway key when auth is enabled. |
+| `403` | Permission denied when auth is enabled. |
+| `404` | Record not found (trace or gateway key). |
+| `405` | Method not allowed for the route. |
+| `409` | Conflict (gateway key already exists or token conflict). |
+| `500` | Internal server or storage read/write failure. |
+| `501` | Store method is not implemented. |
+| `503` | Store unavailable or auth verification unavailable. |
+
+## API troubleshooting
+
+### Protected route returns `401` or `403`
+
+- Symptom: API request fails with auth errors.
+- Cause: Missing gateway key, invalid key, or missing permission.
+- Fix: Provide a valid gateway key with required permission for the route.
+
+### Trace or analytics query returns `400`
+
+- Symptom: Query validation fails.
+- Cause: Invalid integer fields, invalid time format, invalid `group_by`,
+  invalid `bucket`, or invalid range/cursor.
+- Fix: Use supported parameter values and formats, then retry.
+
+### Gateway key mutation returns `501`
+
+- Symptom: Create, rotate, or revoke returns not implemented.
+- Cause: Active config store does not support gateway key mutations.
+- Fix: Use Postgres-backed config store for key lifecycle APIs.
+
+### Route returns `405 method not allowed`
+
+- Symptom: Request method is rejected.
+- Cause: Route only supports specific methods.
+- Fix: Use documented methods for each endpoint.
+
+## Next steps
+
+- [Authorization reference](/gateway/reference/authorization-reference)
+- [Tracing and audit logs](/gateway/capabilities/tracing-and-audit-logs)
+- [Config reference](/gateway/reference/config-reference)

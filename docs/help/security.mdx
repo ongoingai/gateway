@@ -1,0 +1,122 @@
+---
+title: Security
+description: Review security boundaries, default safeguards, and private vulnerability reporting for OngoingAI Gateway.
+related:
+  title: Next steps
+  description: Continue with privacy controls, auth policy details, and tenancy concepts.
+  links:
+    - gateway/core-concepts/privacy-model
+    - gateway/reference/authorization-reference
+    - gateway/core-concepts/keys-workspaces-and-tenancy
+---
+
+Use this page to understand what security controls the gateway enforces.
+Use it to review deployment safeguards and report vulnerabilities correctly.
+
+## Use this guidance when
+
+- You are deploying the gateway in a shared or production environment.
+- You need to verify credential, auth, and tenant-scope boundaries.
+- You need to report a suspected vulnerability privately.
+
+## Security priorities
+
+Highest-priority security classes in this project are:
+
+- gateway auth bypass or privilege escalation
+- cross-tenant data access across `org_id` and `workspace_id` boundaries
+- upstream provider API key leakage in logs, traces, config stores, or errors
+- proxy request-smuggling and header-confusion issues
+- trace tampering and audit-integrity breaks
+
+## Security model
+
+### Credential boundaries
+
+- Provider API keys pass through to upstream providers and must not be
+  persisted as raw values.
+- Stored trace records keep provider key identity as `api_key_hash` and may
+  include last 4 characters in metadata.
+- Sensitive credential headers are redacted in stored traces
+  (`authorization`, `x-api-key`, `x-ongoingai-gateway-key`, `cookie`,
+  `set-cookie`).
+- Gateway keys are separate credentials used for gateway auth and authorization.
+
+### Auth and fail-closed behavior
+
+- If `auth.enabled=false`, protected routes do not require a gateway key.
+- If `auth.enabled=true`, protected proxy and API routes require a valid gateway
+  key in `auth.header`.
+- On proxy routes, valid provider credentials are also required from the client
+  request (`Authorization` or `X-API-Key`).
+- The gateway strips the gateway auth header before forwarding upstream.
+- Unmapped actions under protected prefixes are denied by default.
+- If key verification is unavailable in dynamic auth mode, requests fail closed
+  with `503 gateway key verification unavailable`.
+
+### Tenant isolation
+
+- Gateway identity carries `org_id` and `workspace_id` scope.
+- Trace and analytics list/read paths apply tenant scope filters.
+- Trace detail outside caller tenant scope returns `404 trace not found`.
+- Gateway key list/create/rotate/revoke operations apply caller tenant scope.
+
+### Auditability
+
+- Authorization denies emit structured audit fields such as
+  `audit_action`, `audit_outcome`, `audit_reason`, and tenant identifiers.
+- Gateway key create, rotate, and revoke operations emit lifecycle audit events.
+
+## Secure deployment checklist
+
+1. Enable gateway auth for shared deployments:
+   set `auth.enabled: true`, keep `auth.header` non-empty, and provision gateway
+   keys.
+2. Keep body persistence off by default:
+   set `tracing.capture_bodies: false` unless payload capture is required.
+3. If body capture is required:
+   use `pii.mode: redact_storage` and set conservative `tracing.body_max_size`.
+4. Validate config before restart:
+   run `ongoingai config validate --config ongoingai.yaml`.
+5. Review deny and lifecycle audit logs regularly.
+
+Minimal hardening example:
+
+```yaml filename="ongoingai.yaml"
+auth:
+  enabled: true
+  header: X-OngoingAI-Gateway-Key
+
+tracing:
+  capture_bodies: false
+  body_max_size: 1048576
+
+pii:
+  mode: off
+  policy_id: default/v1
+```
+
+## Reporting vulnerabilities
+
+Do not open public issues for suspected security vulnerabilities.
+Use GitHub private vulnerability reporting for this repository.
+
+Include:
+
+- affected version or commit
+- reproduction steps
+- impact assessment
+- suggested remediation, if available
+
+What to expect:
+
+- reports are acknowledged as quickly as possible
+- fixes prioritize credential exposure, tenant isolation, and auth bypass risks
+- disclosure timing is coordinated with reporters when appropriate
+
+## Next steps
+
+- [Privacy model](/gateway/core-concepts/privacy-model)
+- [Authorization reference](/gateway/reference/authorization-reference)
+- [Keys, workspaces, and tenancy](/gateway/core-concepts/keys-workspaces-and-tenancy)
+- [Troubleshooting](/gateway/help/troubleshooting)

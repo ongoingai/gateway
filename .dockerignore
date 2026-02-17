@@ -1,0 +1,8 @@
+.git
+.github
+.claude
+bin
+dist
+data
+*.db
+*.log
