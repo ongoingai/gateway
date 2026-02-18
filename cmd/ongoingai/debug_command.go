@@ -8,6 +8,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -116,6 +118,40 @@ type debugSelection struct {
 	RunID        string
 }
 
+type debugBundleManifest struct {
+	SchemaVersion  string               `json:"schema_version"`
+	GeneratedAt    time.Time            `json:"generated_at"`
+	SelectionMode  string               `json:"selection_mode"`
+	Selection      debugBundleSelection `json:"selection"`
+	Limit          int                  `json:"limit"`
+	IncludeDiff    bool                 `json:"include_diff"`
+	IncludeBodies  bool                 `json:"include_bodies"`
+	IncludeHeaders bool                 `json:"include_headers"`
+	Chain          debugBundleChain     `json:"chain"`
+	Files          []debugBundleFile    `json:"files"`
+}
+
+type debugBundleSelection struct {
+	TraceID      string `json:"trace_id,omitempty"`
+	TraceGroupID string `json:"trace_group_id,omitempty"`
+	ThreadID     string `json:"thread_id,omitempty"`
+	RunID        string `json:"run_id,omitempty"`
+}
+
+type debugBundleChain struct {
+	SourceTraceID    string `json:"source_trace_id"`
+	CheckpointCount  int    `json:"checkpoint_count"`
+	Truncated        bool   `json:"truncated"`
+	DiffCount        int    `json:"diff_count"`
+	TargetCheckpoint string `json:"target_checkpoint_id"`
+}
+
+type debugBundleFile struct {
+	Name   string `json:"name"`
+	Bytes  int    `json:"bytes"`
+	SHA256 string `json:"sha256"`
+}
+
 func runDebug(args []string, out io.Writer, errOut io.Writer) int {
 	explicitLast := false
 	if len(args) > 0 && strings.TrimSpace(args[0]) == "last" {
@@ -134,6 +170,7 @@ func runDebug(args []string, out io.Writer, errOut io.Writer) int {
 	format := flagSet.String("format", defaultDebugFormat, "Output format: text or json")
 	limit := flagSet.Int("limit", defaultDebugLimit, "Maximum checkpoints to include (1-500)")
 	includeDiff := flagSet.Bool("diff", false, "Include redaction-safe checkpoint diffs")
+	bundleOut := flagSet.String("bundle-out", "", "Directory to write debug bundle (debug-chain.json + manifest.json)")
 	includeHeaders := flagSet.Bool("include-headers", false, "Include request/response headers")
 	includeBodies := flagSet.Bool("include-bodies", false, "Include request/response bodies")
 
@@ -229,6 +266,14 @@ func runDebug(args []string, out io.Writer, errOut io.Writer) int {
 	if err := writeDebug(out, normalizedFormat, document, *includeHeaders, *includeBodies, *includeDiff); err != nil {
 		fmt.Fprintf(errOut, "failed to write debug output: %v\n", err)
 		return 1
+	}
+	if strings.TrimSpace(*bundleOut) != "" {
+		manifestPath, err := writeDebugBundle(strings.TrimSpace(*bundleOut), document, selection, *limit, *includeDiff, *includeHeaders, *includeBodies)
+		if err != nil {
+			fmt.Fprintf(errOut, "failed to write debug bundle: %v\n", err)
+			return 1
+		}
+		fmt.Fprintf(errOut, "wrote debug bundle: %s\n", manifestPath)
 	}
 
 	return 0
@@ -365,6 +410,85 @@ func debugSelectionIdentifier(selection debugSelection) string {
 	return identifier
 }
 
+func (s debugSelection) mode() string {
+	if s.TraceID != "" {
+		return "trace_id"
+	}
+	if s.hasChainFilter() {
+		return "filter"
+	}
+	return "latest"
+}
+
+func writeDebugBundle(
+	outputDir string,
+	document debugDocument,
+	selection debugSelection,
+	limit int,
+	includeDiff bool,
+	includeHeaders bool,
+	includeBodies bool,
+) (string, error) {
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return "", fmt.Errorf("create bundle directory %q: %w", outputDir, err)
+	}
+
+	chainBytes, err := json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("encode debug chain: %w", err)
+	}
+	chainBytes = append(chainBytes, '\n')
+
+	chainFilename := "debug-chain.json"
+	chainPath := filepath.Join(outputDir, chainFilename)
+	if err := os.WriteFile(chainPath, chainBytes, 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", chainFilename, err)
+	}
+
+	manifest := debugBundleManifest{
+		SchemaVersion: "debug-bundle.v1",
+		GeneratedAt:   time.Now().UTC(),
+		SelectionMode: selection.mode(),
+		Selection: debugBundleSelection{
+			TraceID:      selection.TraceID,
+			TraceGroupID: selection.TraceGroupID,
+			ThreadID:     selection.ThreadID,
+			RunID:        selection.RunID,
+		},
+		Limit:          limit,
+		IncludeDiff:    includeDiff,
+		IncludeBodies:  includeBodies,
+		IncludeHeaders: includeHeaders,
+		Chain: debugBundleChain{
+			SourceTraceID:    document.SourceTraceID,
+			CheckpointCount:  document.Chain.CheckpointCount,
+			Truncated:        document.Chain.Truncated,
+			DiffCount:        len(document.Diffs),
+			TargetCheckpoint: document.Chain.TargetCheckpoint,
+		},
+		Files: []debugBundleFile{
+			{
+				Name:   chainFilename,
+				Bytes:  len(chainBytes),
+				SHA256: debugHashedBytes(chainBytes),
+			},
+		},
+	}
+
+	manifestBytes, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("encode manifest: %w", err)
+	}
+	manifestBytes = append(manifestBytes, '\n')
+
+	manifestFilename := "manifest.json"
+	manifestPath := filepath.Join(outputDir, manifestFilename)
+	if err := os.WriteFile(manifestPath, manifestBytes, 0o644); err != nil {
+		return "", fmt.Errorf("write %s: %w", manifestFilename, err)
+	}
+	return manifestPath, nil
+}
+
 func buildDebugDiffs(items []*trace.Trace) []debugCheckpointDiff {
 	if len(items) < 2 {
 		return nil
@@ -460,7 +584,11 @@ func debugMetadataKeyDiff(before map[string]any, after map[string]any) ([]string
 }
 
 func debugHashedString(value string) string {
-	sum := sha256.Sum256([]byte(value))
+	return debugHashedBytes([]byte(value))
+}
+
+func debugHashedBytes(value []byte) string {
+	sum := sha256.Sum256(value)
 	return fmt.Sprintf("%x", sum[:])
 }
 

@@ -188,6 +188,59 @@ func TestRunDebugDiffJSON(t *testing.T) {
 	}
 }
 
+func TestRunDebugBundleExport(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeDebugTestFixture(t, true)
+	bundleDir := filepath.Join(t.TempDir(), "bundle")
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDebug([]string{"--config", configPath, "--trace-group-id", "group-demo", "--format", "json", "--diff", "--bundle-out", bundleDir}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runDebug() code=%d, stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "wrote debug bundle") {
+		t.Fatalf("stderr=%q, want bundle write confirmation", stderr.String())
+	}
+
+	chainPath := filepath.Join(bundleDir, "debug-chain.json")
+	manifestPath := filepath.Join(bundleDir, "manifest.json")
+
+	chainRaw, err := os.ReadFile(chainPath)
+	if err != nil {
+		t.Fatalf("read debug-chain.json: %v", err)
+	}
+	var chain debugDocument
+	if err := json.Unmarshal(chainRaw, &chain); err != nil {
+		t.Fatalf("decode debug-chain.json: %v", err)
+	}
+	if chain.SourceTraceID == "" || chain.Chain.CheckpointCount != 2 {
+		t.Fatalf("chain summary=%+v, want source id and two checkpoints", chain.Chain)
+	}
+
+	manifestRaw, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest.json: %v", err)
+	}
+	var manifest debugBundleManifest
+	if err := json.Unmarshal(manifestRaw, &manifest); err != nil {
+		t.Fatalf("decode manifest.json: %v", err)
+	}
+	if manifest.SchemaVersion != "debug-bundle.v1" {
+		t.Fatalf("schema_version=%q, want debug-bundle.v1", manifest.SchemaVersion)
+	}
+	if manifest.SelectionMode != "filter" {
+		t.Fatalf("selection_mode=%q, want filter", manifest.SelectionMode)
+	}
+	if manifest.Selection.TraceGroupID != "group-demo" {
+		t.Fatalf("selection trace_group_id=%q, want group-demo", manifest.Selection.TraceGroupID)
+	}
+	if len(manifest.Files) != 1 || manifest.Files[0].Name != "debug-chain.json" || manifest.Files[0].SHA256 == "" {
+		t.Fatalf("manifest files=%+v, want debug-chain.json with checksum", manifest.Files)
+	}
+}
+
 func TestRunDebugNoTraces(t *testing.T) {
 	t.Parallel()
 
@@ -243,6 +296,26 @@ func TestRunDebugRejectsLastWithExplicitFilter(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "cannot be combined") {
 		t.Fatalf("stderr=%q, want combination validation", stderr.String())
+	}
+}
+
+func TestRunDebugBundleExportInvalidPath(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeDebugTestFixture(t, true)
+	bundlePath := filepath.Join(t.TempDir(), "bundle-file")
+	if err := os.WriteFile(bundlePath, []byte("not a directory"), 0o644); err != nil {
+		t.Fatalf("write bundle path fixture: %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDebug([]string{"--config", configPath, "--bundle-out", bundlePath}, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("runDebug() code=%d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "failed to write debug bundle") {
+		t.Fatalf("stderr=%q, want bundle write failure", stderr.String())
 	}
 }
 
