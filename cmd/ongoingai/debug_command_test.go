@@ -73,6 +73,90 @@ func TestRunDebugByTraceIDJSON(t *testing.T) {
 	}
 }
 
+func TestRunDebugByTraceGroupIDJSON(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeDebugTestFixture(t, true)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDebug([]string{"--config", configPath, "--trace-group-id", "group-demo", "--format", "json", "--limit", "10"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runDebug() code=%d, stderr=%q", code, stderr.String())
+	}
+
+	var payload debugDocument
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode debug json: %v\nbody=%s", err, stdout.String())
+	}
+	if payload.SourceTraceID != "trace-step-2" {
+		t.Fatalf("source_trace_id=%q, want trace-step-2", payload.SourceTraceID)
+	}
+	if payload.Chain.LineageIdentifier != "trace_group_id" {
+		t.Fatalf("lineage_identifier=%q, want trace_group_id", payload.Chain.LineageIdentifier)
+	}
+	if payload.Chain.GroupID != "group-demo" {
+		t.Fatalf("group_id=%q, want group-demo", payload.Chain.GroupID)
+	}
+	if payload.Chain.CheckpointCount != 2 {
+		t.Fatalf("checkpoint_count=%d, want 2", payload.Chain.CheckpointCount)
+	}
+}
+
+func TestRunDebugByThreadIDJSON(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeDebugTestFixture(t, true)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDebug([]string{"--config", configPath, "--thread-id", "thread-demo", "--format", "json", "--limit", "10"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runDebug() code=%d, stderr=%q", code, stderr.String())
+	}
+
+	var payload debugDocument
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode debug json: %v\nbody=%s", err, stdout.String())
+	}
+	if payload.Chain.LineageIdentifier != "lineage_thread_id" {
+		t.Fatalf("lineage_identifier=%q, want lineage_thread_id", payload.Chain.LineageIdentifier)
+	}
+	if payload.Chain.ThreadID != "thread-demo" {
+		t.Fatalf("thread_id=%q, want thread-demo", payload.Chain.ThreadID)
+	}
+	if payload.Chain.CheckpointCount != 2 {
+		t.Fatalf("checkpoint_count=%d, want 2", payload.Chain.CheckpointCount)
+	}
+}
+
+func TestRunDebugByRunIDJSON(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeDebugTestFixture(t, true)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDebug([]string{"--config", configPath, "--run-id", "run-demo", "--format", "json", "--limit", "10"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runDebug() code=%d, stderr=%q", code, stderr.String())
+	}
+
+	var payload debugDocument
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode debug json: %v\nbody=%s", err, stdout.String())
+	}
+	if payload.Chain.LineageIdentifier != "lineage_run_id" {
+		t.Fatalf("lineage_identifier=%q, want lineage_run_id", payload.Chain.LineageIdentifier)
+	}
+	if payload.Chain.RunID != "run-demo" {
+		t.Fatalf("run_id=%q, want run-demo", payload.Chain.RunID)
+	}
+	if payload.Chain.CheckpointCount != 2 {
+		t.Fatalf("checkpoint_count=%d, want 2", payload.Chain.CheckpointCount)
+	}
+}
+
 func TestRunDebugNoTraces(t *testing.T) {
 	t.Parallel()
 
@@ -100,6 +184,20 @@ func TestRunDebugRejectsUnsupportedPositional(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), `must be "last"`) {
 		t.Fatalf("stderr=%q, want positional argument validation", stderr.String())
+	}
+}
+
+func TestRunDebugRejectsTraceIDWithLineageFilter(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDebug([]string{"--trace-id", "trace-1", "--trace-group-id", "group-1"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("runDebug() code=%d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "cannot be combined") {
+		t.Fatalf("stderr=%q, want combination validation", stderr.String())
 	}
 }
 

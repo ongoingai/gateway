@@ -24,7 +24,7 @@ ongoingai config validate [--config PATH]
 ongoingai shell-init [--config PATH]
 ongoingai wrap [--config PATH] -- <command> [args...]
 ongoingai report [--config PATH] [--format text|json] [--from RFC3339|YYYY-MM-DD] [--to RFC3339|YYYY-MM-DD] [--provider NAME] [--model NAME] [--limit N]
-ongoingai debug [last] [--config PATH] [--trace-id ID] [--format text|json] [--limit N] [--include-headers] [--include-bodies]
+ongoingai debug [last] [--config PATH] [--trace-id ID] [--trace-group-id ID] [--thread-id ID] [--run-id ID] [--format text|json] [--limit N] [--include-headers] [--include-bodies]
 ```
 
 By default, commands read config from `ongoingai.yaml`.
@@ -255,7 +255,7 @@ By default it debugs the latest trace, so this works right after `serve` is stop
 Syntax:
 
 ```bash filename="Terminal"
-ongoingai debug [last] [--config PATH] [--trace-id ID] [--format text|json] [--limit N] [--include-headers] [--include-bodies]
+ongoingai debug [last] [--config PATH] [--trace-id ID] [--trace-group-id ID] [--thread-id ID] [--run-id ID] [--format text|json] [--limit N] [--include-headers] [--include-bodies]
 ```
 
 Flags:
@@ -264,6 +264,9 @@ Flags:
 | --- | --- | --- | --- |
 | `--config` | string | `ongoingai.yaml` | Path to config file. |
 | `--trace-id` | string | empty | Trace ID to debug. If omitted, latest trace is used. |
+| `--trace-group-id` | string | empty | Filter chain by trace group id. |
+| `--thread-id` | string | empty | Filter chain by lineage thread id. |
+| `--run-id` | string | empty | Filter chain by lineage run id. |
 | `--format` | string | `text` | Output format: `text` or `json`. |
 | `--limit` | int | `200` | Maximum lineage checkpoints to include (`1-500`). |
 | `--include-headers` | bool | `false` | Include stored request/response headers per checkpoint. |
@@ -272,7 +275,7 @@ Flags:
 Behavior:
 - Loads and validates config.
 - Connects directly to configured trace storage.
-- Resolves latest trace (or `--trace-id`) and finds related lineage checkpoints.
+- Resolves latest trace (or `--trace-id` / lineage filters) and finds related lineage checkpoints.
 - Prints ordered chain checkpoints with lineage metadata, tokens, latency, and costs.
 
 Exit codes:
@@ -285,6 +288,8 @@ Examples:
 ```bash filename="Terminal"
 ongoingai debug last
 ongoingai debug --trace-id trace_abc123 --format json
+ongoingai debug --trace-group-id group_abc123 --format json
+ongoingai debug --thread-id thread_abc123 --run-id run_abc123
 ongoingai debug --include-headers --include-bodies
 ```
 

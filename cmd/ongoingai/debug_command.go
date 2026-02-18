@@ -77,6 +77,13 @@ type debugLineage struct {
 	Immutable          bool   `json:"immutable"`
 }
 
+type debugSelection struct {
+	TraceID      string
+	TraceGroupID string
+	ThreadID     string
+	RunID        string
+}
+
 func runDebug(args []string, out io.Writer, errOut io.Writer) int {
 	explicitLast := false
 	if len(args) > 0 && strings.TrimSpace(args[0]) == "last" {
@@ -89,6 +96,9 @@ func runDebug(args []string, out io.Writer, errOut io.Writer) int {
 
 	configPath := flagSet.String("config", defaultConfigPath, "Path to config file")
 	traceID := flagSet.String("trace-id", "", "Trace ID to debug (defaults to latest trace)")
+	traceGroupID := flagSet.String("trace-group-id", "", "Trace group ID filter")
+	threadID := flagSet.String("thread-id", "", "Thread ID filter")
+	runID := flagSet.String("run-id", "", "Run ID filter")
 	format := flagSet.String("format", defaultDebugFormat, "Output format: text or json")
 	limit := flagSet.Int("limit", defaultDebugLimit, "Maximum checkpoints to include (1-500)")
 	includeHeaders := flagSet.Bool("include-headers", false, "Include request/response headers")
@@ -107,6 +117,21 @@ func runDebug(args []string, out io.Writer, errOut io.Writer) int {
 	}
 	if flagSet.NArg() == 1 && strings.TrimSpace(flagSet.Arg(0)) == "last" {
 		explicitLast = true
+	}
+
+	selection := debugSelection{
+		TraceID:      strings.TrimSpace(*traceID),
+		TraceGroupID: strings.TrimSpace(*traceGroupID),
+		ThreadID:     strings.TrimSpace(*threadID),
+		RunID:        strings.TrimSpace(*runID),
+	}
+	if explicitLast && (selection.TraceID != "" || selection.hasChainFilter()) {
+		fmt.Fprintln(errOut, `debug "last" cannot be combined with --trace-id, --trace-group-id, --thread-id, or --run-id`)
+		return 2
+	}
+	if selection.TraceID != "" && selection.hasChainFilter() {
+		fmt.Fprintln(errOut, "trace-id cannot be combined with trace-group-id/thread-id/run-id filters")
+		return 2
 	}
 
 	normalizedFormat := strings.ToLower(strings.TrimSpace(*format))
@@ -145,11 +170,10 @@ func runDebug(args []string, out io.Writer, errOut io.Writer) int {
 		}()
 	}
 
-	resolvedTraceID := strings.TrimSpace(*traceID)
 	if explicitLast {
-		resolvedTraceID = ""
+		selection = debugSelection{}
 	}
-	source, err := resolveDebugSourceTrace(context.Background(), store, resolvedTraceID)
+	source, err := resolveDebugSourceTrace(context.Background(), store, selection)
 	if err != nil {
 		if errors.Is(err, trace.ErrNotFound) {
 			fmt.Fprintln(errOut, "trace not found")
@@ -163,7 +187,7 @@ func runDebug(args []string, out io.Writer, errOut io.Writer) int {
 		return 1
 	}
 
-	document, err := buildDebugDocument(context.Background(), store, source, *limit, *includeHeaders, *includeBodies)
+	document, err := buildDebugDocument(context.Background(), store, source, selection, *limit, *includeHeaders, *includeBodies)
 	if err != nil {
 		fmt.Fprintf(errOut, "failed to build debug chain: %v\n", err)
 		return 1
@@ -177,12 +201,23 @@ func runDebug(args []string, out io.Writer, errOut io.Writer) int {
 	return 0
 }
 
-func resolveDebugSourceTrace(ctx context.Context, store trace.TraceStore, traceID string) (*trace.Trace, error) {
-	if traceID != "" {
-		return store.GetTrace(ctx, traceID)
+func (s debugSelection) hasChainFilter() bool {
+	return s.TraceGroupID != "" || s.ThreadID != "" || s.RunID != ""
+}
+
+func resolveDebugSourceTrace(ctx context.Context, store trace.TraceStore, selection debugSelection) (*trace.Trace, error) {
+	if selection.TraceID != "" {
+		return store.GetTrace(ctx, selection.TraceID)
 	}
 
-	result, err := store.QueryTraces(ctx, trace.TraceFilter{Limit: 1})
+	filter := trace.TraceFilter{Limit: 1}
+	if selection.hasChainFilter() {
+		filter.TraceGroupID = selection.TraceGroupID
+		filter.ThreadID = selection.ThreadID
+		filter.RunID = selection.RunID
+	}
+
+	result, err := store.QueryTraces(ctx, filter)
 	if err != nil {
 		return nil, err
 	}
@@ -196,20 +231,43 @@ func buildDebugDocument(
 	ctx context.Context,
 	store trace.TraceStore,
 	source *trace.Trace,
+	selection debugSelection,
 	limit int,
 	includeHeaders bool,
 	includeBodies bool,
 ) (debugDocument, error) {
 	sourceLineage := extractDebugLineage(source, true)
-	filter := trace.TraceFilter{
-		TraceGroupID: sourceLineage.GroupID,
-		ThreadID:     sourceLineage.ThreadID,
-		RunID:        sourceLineage.RunID,
+	filter := trace.TraceFilter{}
+	chainGroupID := sourceLineage.GroupID
+	chainThreadID := sourceLineage.ThreadID
+	chainRunID := sourceLineage.RunID
+	lineageIdentifier := "(single trace)"
+
+	if selection.hasChainFilter() {
+		filter.TraceGroupID = selection.TraceGroupID
+		filter.ThreadID = selection.ThreadID
+		filter.RunID = selection.RunID
+		chainGroupID = selection.TraceGroupID
+		chainThreadID = selection.ThreadID
+		chainRunID = selection.RunID
+		lineageIdentifier = debugSelectionIdentifier(selection)
+	} else {
+		filter.TraceGroupID = sourceLineage.GroupID
+		filter.ThreadID = sourceLineage.ThreadID
+		filter.RunID = sourceLineage.RunID
+		switch {
+		case sourceLineage.GroupID != "":
+			lineageIdentifier = "trace_group_id"
+		case sourceLineage.ThreadID != "":
+			lineageIdentifier = "lineage_thread_id"
+		case sourceLineage.RunID != "":
+			lineageIdentifier = "lineage_run_id"
+		}
 	}
 
 	items := make([]*trace.Trace, 0, limit)
 	truncated := false
-	if sourceLineage.GroupID != "" || sourceLineage.ThreadID != "" || sourceLineage.RunID != "" {
+	if filter.TraceGroupID != "" || filter.ThreadID != "" || filter.RunID != "" {
 		var err error
 		items, truncated, err = queryDebugChainItems(ctx, store, filter, limit)
 		if err != nil {
@@ -229,25 +287,15 @@ func buildDebugDocument(
 		checkpoints = append(checkpoints, toDebugTraceCheckpoint(item, i+1, includeHeaders, includeBodies))
 	}
 
-	lineageIdentifier := "(single trace)"
-	switch {
-	case sourceLineage.GroupID != "":
-		lineageIdentifier = "trace_group_id"
-	case sourceLineage.ThreadID != "":
-		lineageIdentifier = "lineage_thread_id"
-	case sourceLineage.RunID != "":
-		lineageIdentifier = "lineage_run_id"
-	}
-
 	return debugDocument{
 		GeneratedAt:     time.Now().UTC(),
 		SourceTraceID:   strings.TrimSpace(source.ID),
 		SourceTimestamp: debugOrderTime(source),
 		Source:          toDebugTraceCheckpoint(source, 0, includeHeaders, includeBodies),
 		Chain: debugChain{
-			GroupID:           sourceLineage.GroupID,
-			ThreadID:          sourceLineage.ThreadID,
-			RunID:             sourceLineage.RunID,
+			GroupID:           chainGroupID,
+			ThreadID:          chainThreadID,
+			RunID:             chainRunID,
 			TargetCheckpoint:  strings.TrimSpace(source.ID),
 			CheckpointCount:   len(checkpoints),
 			Truncated:         truncated,
@@ -255,6 +303,27 @@ func buildDebugDocument(
 			LineageIdentifier: lineageIdentifier,
 		},
 	}, nil
+}
+
+func debugSelectionIdentifier(selection debugSelection) string {
+	count := 0
+	identifier := "(single trace)"
+	if selection.TraceGroupID != "" {
+		count++
+		identifier = "trace_group_id"
+	}
+	if selection.ThreadID != "" {
+		count++
+		identifier = "lineage_thread_id"
+	}
+	if selection.RunID != "" {
+		count++
+		identifier = "lineage_run_id"
+	}
+	if count > 1 {
+		return "composite_filter"
+	}
+	return identifier
 }
 
 func queryDebugChainItems(ctx context.Context, store trace.TraceStore, filter trace.TraceFilter, totalLimit int) ([]*trace.Trace, bool, error) {
