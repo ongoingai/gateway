@@ -20,7 +20,7 @@ This roadmap is organized as priority-ordered phases.
 
 - Phase 0: Completed (15/15)
 - Phase 1: Completed (20/20)
-- Phase 2: Planned (0/16)
+- Phase 2: Planned (1/16)
 
 ## Phase 0: Foundation And Initial Setup (Completed)
 
@@ -98,7 +98,7 @@ Focus: make local and production troubleshooting faster while improving trace fi
 
 Planned work:
 
-- [ ] Ship offline-first CLI debugging workflow as a first-class operator path (`report` and `debug`) so post-incident analysis does not depend on a live gateway process.
+- [x] Ship offline-first CLI debugging workflow as a first-class operator path (`report` and `debug`) so post-incident analysis does not depend on a live gateway process.
 - [ ] Add focused trace drill-down CLI commands for direct trace inspection by `trace_id`, `trace_group_id`, `thread_id`, and `run_id`.
 - [ ] Add redaction-safe checkpoint diff tooling to compare trace request/response/metadata changes across lineage steps.
 - [ ] Add reproducible debug bundle export (`json` + metadata manifest) for support escalation and CI artifact capture.
