@@ -18,6 +18,7 @@ You will start the gateway, proxy one request, and confirm trace capture.
 - Start the gateway on `localhost:8080`.
 - Send one provider request through the proxy.
 - Confirm trace and analytics responses from the API.
+- Stop the server and generate a local CLI report.
 
 ## Use this quickstart when
 
@@ -94,6 +95,17 @@ You will start the gateway, proxy one request, and confirm trace capture.
    - `status` set to `ok` from `/api/health`
    - At least one trace item from `/api/traces`
 
+6. Stop the gateway in Terminal A (`Ctrl+C`), then generate a report in
+   Terminal B.
+
+   ```bash filename="Terminal B"
+   ongoingai report
+   ongoingai debug last
+   ```
+
+   You should see totals plus a full lineage-chain debug view for the latest
+   trace from local storage.
+
 ## Examples
 
 ### Minimal example
@@ -111,7 +123,7 @@ curl "http://localhost:8080/api/traces?limit=1"
 
 ### Practical example
 
-Run requests across two providers, then view summary analytics:
+Run requests across two providers, then generate an offline report:
 
 ```bash filename="Terminal B"
 curl http://localhost:8080/openai/v1/chat/completions \
@@ -125,10 +137,13 @@ curl http://localhost:8080/anthropic/v1/messages \
   -H "content-type: application/json" \
   -d '{"model":"claude-sonnet-4-latest","max_tokens":128,"messages":[{"role":"user","content":"Reply with ok"}]}'
 
-curl "http://localhost:8080/api/analytics/summary"
+# Stop ongoingai serve in Terminal A first.
+ongoingai report
+ongoingai debug last
 ```
 
-You should see request, token, and estimated cost totals.
+You should see request, token, and estimated cost totals plus the latest trace
+chain checkpoints.
 
 ## Troubleshooting
 

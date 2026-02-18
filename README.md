@@ -43,7 +43,7 @@ export OPENAI_BASE_URL=http://localhost:8080/openai/v1
 export ANTHROPIC_BASE_URL=http://localhost:8080/anthropic
 ```
 
-### 3) Send a request and verify tracing
+### 3) Send requests through both providers
 
 ```bash
 curl http://localhost:8080/openai/v1/chat/completions \
@@ -51,11 +51,22 @@ curl http://localhost:8080/openai/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"Reply with ok"}]}'
 
-# Confirm the trace was captured
-curl "http://localhost:8080/api/traces?limit=1"
+curl http://localhost:8080/anthropic/v1/messages \
+  -H "x-api-key: $ANTHROPIC_API_KEY" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "content-type: application/json" \
+  -d '{"model":"claude-sonnet-4-latest","max_tokens":128,"messages":[{"role":"user","content":"Reply with ok"}]}'
 ```
 
-Use your tools normally — everything is now traced.
+### 4) Stop the gateway and print an offline report
+
+```bash
+# Stop ongoingai serve (Ctrl+C), then run:
+ongoingai report
+ongoingai debug last
+```
+
+`ongoingai report` and `ongoingai debug last` read configured storage directly, so they work even when the server is not running.
 
 ### Alternative start modes
 

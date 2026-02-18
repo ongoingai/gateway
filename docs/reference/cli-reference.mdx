@@ -1,6 +1,6 @@
 ---
 title: CLI reference
-description: Use ongoingai commands to start the gateway, validate config, set SDK base URLs, and wrap client commands.
+description: Use ongoingai commands to start the gateway, validate config, set SDK base URLs, wrap client commands, generate offline reports, and debug trace chains.
 related:
   title: Next steps
   description: Continue with config details, env overrides, and API contracts.
@@ -23,6 +23,8 @@ ongoingai -v
 ongoingai config validate [--config PATH]
 ongoingai shell-init [--config PATH]
 ongoingai wrap [--config PATH] -- <command> [args...]
+ongoingai report [--config PATH] [--format text|json] [--from RFC3339|YYYY-MM-DD] [--to RFC3339|YYYY-MM-DD] [--provider NAME] [--model NAME] [--limit N]
+ongoingai debug [last] [--config PATH] [--trace-id ID] [--format text|json] [--limit N] [--include-headers] [--include-bodies]
 ```
 
 By default, commands read config from `ongoingai.yaml`.
@@ -40,6 +42,8 @@ deployment gates before restart.
 | `config validate` | Load and validate config, then exit. |
 | `shell-init` | Print shell exports for provider base URLs. |
 | `wrap` | Run another command with gateway base URLs injected into env. |
+| `report` | Read trace storage directly and print analytics + recent trace report. |
+| `debug` | Inspect the latest trace (or a specific trace) and print its full lineage chain. |
 
 ## Command reference
 
@@ -199,6 +203,89 @@ Examples:
 ```bash filename="Terminal"
 ongoingai wrap -- python my_ai_script.py
 ongoingai wrap -- claude-code "summarize recent traces"
+```
+
+### `ongoingai report`
+
+Generate a full local report from the configured trace store.
+This command does not require `ongoingai serve` to be running.
+
+Syntax:
+
+```bash filename="Terminal"
+ongoingai report [--config PATH] [--format text|json] [--from RFC3339|YYYY-MM-DD] [--to RFC3339|YYYY-MM-DD] [--provider NAME] [--model NAME] [--limit N]
+```
+
+Flags:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--config` | string | `ongoingai.yaml` | Path to config file. |
+| `--format` | string | `text` | Output format: `text` or `json`. |
+| `--from` | string | empty | Inclusive start time (`RFC3339` or `YYYY-MM-DD`). |
+| `--to` | string | empty | Inclusive end time (`RFC3339` or `YYYY-MM-DD`). |
+| `--provider` | string | empty | Filter report data to one provider. |
+| `--model` | string | empty | Filter report data to one model. |
+| `--limit` | int | `10` | Number of recent traces to include (`1-200`). |
+
+Behavior:
+- Loads and validates config.
+- Connects directly to SQLite or Postgres trace storage.
+- Queries usage, cost, models, key stats, provider breakdown, and recent traces.
+- Prints a report without requiring the HTTP server.
+
+Exit codes:
+- `0`: Report generated successfully.
+- `1`: Config, storage, or query error.
+- `2`: Usage, flag parse, or invalid filter range.
+
+Examples:
+
+```bash filename="Terminal"
+ongoingai report
+ongoingai report --format json --from 2026-02-01 --to 2026-02-14
+ongoingai report --provider openai --limit 25
+```
+
+### `ongoingai debug`
+
+Inspect one trace and its lineage chain directly from local storage.
+By default it debugs the latest trace, so this works right after `serve` is stopped.
+
+Syntax:
+
+```bash filename="Terminal"
+ongoingai debug [last] [--config PATH] [--trace-id ID] [--format text|json] [--limit N] [--include-headers] [--include-bodies]
+```
+
+Flags:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--config` | string | `ongoingai.yaml` | Path to config file. |
+| `--trace-id` | string | empty | Trace ID to debug. If omitted, latest trace is used. |
+| `--format` | string | `text` | Output format: `text` or `json`. |
+| `--limit` | int | `200` | Maximum lineage checkpoints to include (`1-500`). |
+| `--include-headers` | bool | `false` | Include stored request/response headers per checkpoint. |
+| `--include-bodies` | bool | `false` | Include stored request/response bodies per checkpoint. |
+
+Behavior:
+- Loads and validates config.
+- Connects directly to configured trace storage.
+- Resolves latest trace (or `--trace-id`) and finds related lineage checkpoints.
+- Prints ordered chain checkpoints with lineage metadata, tokens, latency, and costs.
+
+Exit codes:
+- `0`: Debug chain generated successfully.
+- `1`: Config, storage, trace lookup, or query error.
+- `2`: Usage or argument parse error.
+
+Examples:
+
+```bash filename="Terminal"
+ongoingai debug last
+ongoingai debug --trace-id trace_abc123 --format json
+ongoingai debug --include-headers --include-bodies
 ```
 
 ## Process-level behavior

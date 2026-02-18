@@ -185,6 +185,10 @@ func run(args []string) int {
 		return runShellInit(args[1:], os.Stdout, os.Stderr)
 	case "wrap":
 		return runWrap(args[1:], os.Stdout, os.Stderr)
+	case "report":
+		return runReport(args[1:], os.Stdout, os.Stderr)
+	case "debug":
+		return runDebug(args[1:], os.Stdout, os.Stderr)
 	default:
 		printUsage(os.Stderr)
 		return 2
@@ -616,6 +620,8 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  ongoingai config validate [--config path/to/ongoingai.yaml]")
 	fmt.Fprintln(out, "  ongoingai shell-init [--config path/to/ongoingai.yaml]")
 	fmt.Fprintln(out, "  ongoingai wrap [--config path/to/ongoingai.yaml] -- <command> [args...]")
+	fmt.Fprintln(out, "  ongoingai report [--config path/to/ongoingai.yaml] [--format text|json] [--from RFC3339|YYYY-MM-DD] [--to RFC3339|YYYY-MM-DD] [--provider NAME] [--model NAME] [--limit N]")
+	fmt.Fprintln(out, "  ongoingai debug [last] [--config path/to/ongoingai.yaml] [--trace-id ID] [--format text|json] [--limit N] [--include-headers] [--include-bodies]")
 }
 
 func printConfigUsage(out io.Writer) {
