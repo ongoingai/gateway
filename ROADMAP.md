@@ -20,6 +20,7 @@ This roadmap is organized as priority-ordered phases.
 
 - Phase 0: Completed (15/15)
 - Phase 1: Completed (20/20)
+- Phase 2: In Progress (0/9)
 
 ## Phase 0: Foundation And Initial Setup (Completed)
 
@@ -90,6 +91,32 @@ Exit criteria:
 6. API and config contracts are documented and stable.
 7. Self-hosting guide covers setup, configuration, storage driver selection, and basic troubleshooting.
 8. Write-path architecture allows backend transition (direct DB -> ingest service) with minimal gateway surface changes.
+
+## Phase 2: Observability And OpenTelemetry Expansion
+
+Focus: deepen operational visibility across the gateway with richer metrics, broader OpenTelemetry coverage, and actionable analytics for latency, errors, and cost.
+
+Planned work:
+
+- [ ] Add internal metrics for trace write pipeline health: queue depth, enqueue/drop rates, flush latency, and batch sizes.
+- [ ] Add write failure diagnostics with structured error classification and per-store failure counters.
+- [ ] Add provider health metrics: upstream request counts, error rates, and response latency histograms per provider and model.
+- [ ] Expand analytics depth for request latency distributions, error rate breakdowns by provider/route/key, and cost trend aggregations over configurable windows.
+- [ ] Add OpenTelemetry spans for key gateway operations: auth evaluation, provider routing, trace enqueue, and storage writes.
+- [ ] Add OpenTelemetry metric instruments (counters, histograms, gauges) for queue pressure, write throughput, provider health, and proxy latency.
+- [ ] Ensure all new spans and metrics carry consistent tenant-scoped attributes (org, workspace, provider, model).
+- [ ] Add Prometheus-compatible metric export support.
+- [ ] Document new metrics, spans, and recommended alerting thresholds in operator guidance.
+
+Exit criteria:
+
+1. Queue depth, drop rates, and flush behavior are observable via metrics and spans.
+2. Write failures are classified and counted with enough detail to diagnose storage issues without log tailing.
+3. Provider health (latency, errors, availability) is queryable per provider and model.
+4. Latency, error rate, and cost analytics are available through the analytics API with configurable time windows.
+5. All new OpenTelemetry spans and metrics follow consistent naming and carry tenant-scoped attributes.
+6. Prometheus export is functional and documented.
+7. Operator docs cover new observability surface, recommended dashboards, and alerting guidance.
 
 ## What's Next
 
