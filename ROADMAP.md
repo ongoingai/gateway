@@ -20,7 +20,7 @@ This roadmap is organized as priority-ordered phases.
 
 - Phase 0: Completed (15/15)
 - Phase 1: Completed (20/20)
-- Phase 2: In Progress (0/12)
+- Phase 2: In Progress (1/12)
 
 ## Phase 0: Foundation And Initial Setup (Completed)
 
@@ -98,7 +98,7 @@ Focus: deepen operational visibility across the gateway with richer metrics, bro
 
 Planned work:
 
-- [ ] Add internal metrics for trace write pipeline health: queue depth, enqueue/drop rates, flush latency, and batch sizes.
+- [x] Add internal metrics for trace write pipeline health: queue depth, enqueue/drop rates, flush latency, and batch sizes.
 - [ ] Add write failure diagnostics with structured error classification and per-store failure counters.
 - [ ] Add provider health metrics: upstream request counts, error rates, and response latency histograms per provider and model.
 - [ ] Expand analytics depth for request latency distributions, error rate breakdowns by provider/route/key, and cost trend aggregations over configurable windows.
