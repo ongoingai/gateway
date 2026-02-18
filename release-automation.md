@@ -44,23 +44,3 @@ make version-next
 ## Repository Setting Required
 
 In GitHub repository settings, set Actions workflow permissions to `Read and write permissions` so `auto-tag.yml` can push tags.
-
-## Optional: Install Script Host
-
-If you want `ongoingai.dev` to serve only the installer while binaries come from GitHub Releases, this minimal Fastify app works:
-
-```js
-import Fastify from "fastify";
-import fs from "node:fs/promises";
-
-const app = Fastify({ logger: true });
-const installScript = await fs.readFile("./scripts/install.sh", "utf8");
-
-app.get("/install.sh", async (_req, reply) => {
-  reply.type("text/x-shellscript; charset=utf-8").send(installScript);
-});
-
-app.listen({ host: "0.0.0.0", port: 3000 });
-```
-
-You can run this behind Nginx/Caddy on `ongoingai.dev` and route `/install.sh` to it.

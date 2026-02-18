@@ -26,7 +26,7 @@ OngoingAI Gateway gives you a **provider-agnostic request log** with **privacy-f
 ### 1) Install and start the gateway
 
 ```bash
-curl -sSL https://ongoingai.dev/install.sh | sh
+curl -fsSL https://ongoing.ai/install.sh | sh
 ongoingai serve
 ```
 
