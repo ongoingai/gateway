@@ -621,7 +621,7 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  ongoingai shell-init [--config path/to/ongoingai.yaml]")
 	fmt.Fprintln(out, "  ongoingai wrap [--config path/to/ongoingai.yaml] -- <command> [args...]")
 	fmt.Fprintln(out, "  ongoingai report [--config path/to/ongoingai.yaml] [--format text|json] [--from RFC3339|YYYY-MM-DD] [--to RFC3339|YYYY-MM-DD] [--provider NAME] [--model NAME] [--limit N]")
-	fmt.Fprintln(out, "  ongoingai debug [last] [--config path/to/ongoingai.yaml] [--trace-id ID] [--trace-group-id ID] [--thread-id ID] [--run-id ID] [--format text|json] [--limit N] [--include-headers] [--include-bodies]")
+	fmt.Fprintln(out, "  ongoingai debug [last] [--config path/to/ongoingai.yaml] [--trace-id ID] [--trace-group-id ID] [--thread-id ID] [--run-id ID] [--format text|json] [--limit N] [--diff] [--include-headers] [--include-bodies]")
 }
 
 func printConfigUsage(out io.Writer) {

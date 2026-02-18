@@ -24,7 +24,7 @@ ongoingai config validate [--config PATH]
 ongoingai shell-init [--config PATH]
 ongoingai wrap [--config PATH] -- <command> [args...]
 ongoingai report [--config PATH] [--format text|json] [--from RFC3339|YYYY-MM-DD] [--to RFC3339|YYYY-MM-DD] [--provider NAME] [--model NAME] [--limit N]
-ongoingai debug [last] [--config PATH] [--trace-id ID] [--trace-group-id ID] [--thread-id ID] [--run-id ID] [--format text|json] [--limit N] [--include-headers] [--include-bodies]
+ongoingai debug [last] [--config PATH] [--trace-id ID] [--trace-group-id ID] [--thread-id ID] [--run-id ID] [--format text|json] [--limit N] [--diff] [--include-headers] [--include-bodies]
 ```
 
 By default, commands read config from `ongoingai.yaml`.
@@ -255,7 +255,7 @@ By default it debugs the latest trace, so this works right after `serve` is stop
 Syntax:
 
 ```bash filename="Terminal"
-ongoingai debug [last] [--config PATH] [--trace-id ID] [--trace-group-id ID] [--thread-id ID] [--run-id ID] [--format text|json] [--limit N] [--include-headers] [--include-bodies]
+ongoingai debug [last] [--config PATH] [--trace-id ID] [--trace-group-id ID] [--thread-id ID] [--run-id ID] [--format text|json] [--limit N] [--diff] [--include-headers] [--include-bodies]
 ```
 
 Flags:
@@ -269,6 +269,7 @@ Flags:
 | `--run-id` | string | empty | Filter chain by lineage run id. |
 | `--format` | string | `text` | Output format: `text` or `json`. |
 | `--limit` | int | `200` | Maximum lineage checkpoints to include (`1-500`). |
+| `--diff` | bool | `false` | Include redaction-safe checkpoint diffs between consecutive chain steps. |
 | `--include-headers` | bool | `false` | Include stored request/response headers per checkpoint. |
 | `--include-bodies` | bool | `false` | Include stored request/response bodies per checkpoint. |
 
@@ -277,6 +278,7 @@ Behavior:
 - Connects directly to configured trace storage.
 - Resolves latest trace (or `--trace-id` / lineage filters) and finds related lineage checkpoints.
 - Prints ordered chain checkpoints with lineage metadata, tokens, latency, and costs.
+- When `--diff` is enabled, prints redaction-safe deltas (field changes, token/latency deltas, metadata key changes) without exposing raw secret values.
 
 Exit codes:
 - `0`: Debug chain generated successfully.
@@ -290,6 +292,7 @@ ongoingai debug last
 ongoingai debug --trace-id trace_abc123 --format json
 ongoingai debug --trace-group-id group_abc123 --format json
 ongoingai debug --thread-id thread_abc123 --run-id run_abc123
+ongoingai debug --trace-group-id group_abc123 --diff
 ongoingai debug --include-headers --include-bodies
 ```
 

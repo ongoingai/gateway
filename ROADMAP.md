@@ -20,7 +20,7 @@ This roadmap is organized as priority-ordered phases.
 
 - Phase 0: Completed (15/15)
 - Phase 1: Completed (20/20)
-- Phase 2: Planned (2/16)
+- Phase 2: Planned (3/16)
 
 ## Phase 0: Foundation And Initial Setup (Completed)
 
@@ -100,7 +100,7 @@ Planned work:
 
 - [x] Ship offline-first CLI debugging workflow as a first-class operator path (`report` and `debug`) so post-incident analysis does not depend on a live gateway process.
 - [x] Add focused trace drill-down CLI commands for direct trace inspection by `trace_id`, `trace_group_id`, `thread_id`, and `run_id`.
-- [ ] Add redaction-safe checkpoint diff tooling to compare trace request/response/metadata changes across lineage steps.
+- [x] Add redaction-safe checkpoint diff tooling to compare trace request/response/metadata changes across lineage steps.
 - [ ] Add reproducible debug bundle export (`json` + metadata manifest) for support escalation and CI artifact capture.
 - [ ] Add CLI filtering and output controls for scripting (`--format json`, deterministic ordering, stable field contracts).
 - [ ] Add a local developer diagnostics command (`dev doctor`) to validate config, storage connectivity, route wiring, and auth posture in one pass.

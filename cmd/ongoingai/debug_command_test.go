@@ -157,6 +157,37 @@ func TestRunDebugByRunIDJSON(t *testing.T) {
 	}
 }
 
+func TestRunDebugDiffJSON(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeDebugTestFixture(t, true)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDebug([]string{"--config", configPath, "--trace-group-id", "group-demo", "--format", "json", "--diff"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runDebug() code=%d, stderr=%q", code, stderr.String())
+	}
+
+	var payload debugDocument
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode debug json: %v\nbody=%s", err, stdout.String())
+	}
+	if len(payload.Diffs) != 1 {
+		t.Fatalf("diff_count=%d, want 1", len(payload.Diffs))
+	}
+	diff := payload.Diffs[0]
+	if diff.FromCheckpointID != "trace-step-1" || diff.ToCheckpointID != "trace-step-2" {
+		t.Fatalf("diff edge=%s->%s, want trace-step-1->trace-step-2", diff.FromCheckpointID, diff.ToCheckpointID)
+	}
+	if !diff.RequestPathChanged || !diff.ModelChanged {
+		t.Fatalf("diff=%+v, want request path/model changed", diff)
+	}
+	if diff.TotalTokensDelta != 5 {
+		t.Fatalf("total_tokens_delta=%d, want 5", diff.TotalTokensDelta)
+	}
+}
+
 func TestRunDebugNoTraces(t *testing.T) {
 	t.Parallel()
 
@@ -193,6 +224,20 @@ func TestRunDebugRejectsTraceIDWithLineageFilter(t *testing.T) {
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	code := runDebug([]string{"--trace-id", "trace-1", "--trace-group-id", "group-1"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("runDebug() code=%d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "cannot be combined") {
+		t.Fatalf("stderr=%q, want combination validation", stderr.String())
+	}
+}
+
+func TestRunDebugRejectsLastWithExplicitFilter(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDebug([]string{"last", "--trace-group-id", "group-1"}, &stdout, &stderr)
 	if code != 2 {
 		t.Fatalf("runDebug() code=%d, want 2", code)
 	}

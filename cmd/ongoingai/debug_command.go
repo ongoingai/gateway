@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -24,11 +25,12 @@ const (
 )
 
 type debugDocument struct {
-	GeneratedAt     time.Time            `json:"generated_at"`
-	SourceTraceID   string               `json:"source_trace_id"`
-	SourceTimestamp time.Time            `json:"source_timestamp"`
-	Source          debugTraceCheckpoint `json:"source"`
-	Chain           debugChain           `json:"chain"`
+	GeneratedAt     time.Time             `json:"generated_at"`
+	SourceTraceID   string                `json:"source_trace_id"`
+	SourceTimestamp time.Time             `json:"source_timestamp"`
+	Source          debugTraceCheckpoint  `json:"source"`
+	Chain           debugChain            `json:"chain"`
+	Diffs           []debugCheckpointDiff `json:"diffs,omitempty"`
 }
 
 type debugChain struct {
@@ -77,6 +79,36 @@ type debugLineage struct {
 	Immutable          bool   `json:"immutable"`
 }
 
+type debugCheckpointDiff struct {
+	FromCheckpointID         string   `json:"from_checkpoint_id"`
+	ToCheckpointID           string   `json:"to_checkpoint_id"`
+	ProviderChanged          bool     `json:"provider_changed"`
+	ModelChanged             bool     `json:"model_changed"`
+	RequestMethodChanged     bool     `json:"request_method_changed"`
+	RequestPathChanged       bool     `json:"request_path_changed"`
+	ResponseStatusChanged    bool     `json:"response_status_changed"`
+	InputTokensDelta         int      `json:"input_tokens_delta"`
+	OutputTokensDelta        int      `json:"output_tokens_delta"`
+	TotalTokensDelta         int      `json:"total_tokens_delta"`
+	LatencyDeltaMS           int64    `json:"latency_delta_ms"`
+	EstimatedCostDeltaUSD    float64  `json:"estimated_cost_delta_usd"`
+	RequestHeadersChanged    bool     `json:"request_headers_changed"`
+	ResponseHeadersChanged   bool     `json:"response_headers_changed"`
+	RequestBodyChanged       bool     `json:"request_body_changed"`
+	ResponseBodyChanged      bool     `json:"response_body_changed"`
+	RequestHeadersBytesFrom  int      `json:"request_headers_bytes_from"`
+	RequestHeadersBytesTo    int      `json:"request_headers_bytes_to"`
+	ResponseHeadersBytesFrom int      `json:"response_headers_bytes_from"`
+	ResponseHeadersBytesTo   int      `json:"response_headers_bytes_to"`
+	RequestBodyBytesFrom     int      `json:"request_body_bytes_from"`
+	RequestBodyBytesTo       int      `json:"request_body_bytes_to"`
+	ResponseBodyBytesFrom    int      `json:"response_body_bytes_from"`
+	ResponseBodyBytesTo      int      `json:"response_body_bytes_to"`
+	MetadataKeysAdded        []string `json:"metadata_keys_added,omitempty"`
+	MetadataKeysRemoved      []string `json:"metadata_keys_removed,omitempty"`
+	MetadataKeysChanged      []string `json:"metadata_keys_changed,omitempty"`
+}
+
 type debugSelection struct {
 	TraceID      string
 	TraceGroupID string
@@ -101,6 +133,7 @@ func runDebug(args []string, out io.Writer, errOut io.Writer) int {
 	runID := flagSet.String("run-id", "", "Run ID filter")
 	format := flagSet.String("format", defaultDebugFormat, "Output format: text or json")
 	limit := flagSet.Int("limit", defaultDebugLimit, "Maximum checkpoints to include (1-500)")
+	includeDiff := flagSet.Bool("diff", false, "Include redaction-safe checkpoint diffs")
 	includeHeaders := flagSet.Bool("include-headers", false, "Include request/response headers")
 	includeBodies := flagSet.Bool("include-bodies", false, "Include request/response bodies")
 
@@ -187,13 +220,13 @@ func runDebug(args []string, out io.Writer, errOut io.Writer) int {
 		return 1
 	}
 
-	document, err := buildDebugDocument(context.Background(), store, source, selection, *limit, *includeHeaders, *includeBodies)
+	document, err := buildDebugDocument(context.Background(), store, source, selection, *limit, *includeHeaders, *includeBodies, *includeDiff)
 	if err != nil {
 		fmt.Fprintf(errOut, "failed to build debug chain: %v\n", err)
 		return 1
 	}
 
-	if err := writeDebug(out, normalizedFormat, document, *includeHeaders, *includeBodies); err != nil {
+	if err := writeDebug(out, normalizedFormat, document, *includeHeaders, *includeBodies, *includeDiff); err != nil {
 		fmt.Fprintf(errOut, "failed to write debug output: %v\n", err)
 		return 1
 	}
@@ -235,6 +268,7 @@ func buildDebugDocument(
 	limit int,
 	includeHeaders bool,
 	includeBodies bool,
+	includeDiff bool,
 ) (debugDocument, error) {
 	sourceLineage := extractDebugLineage(source, true)
 	filter := trace.TraceFilter{}
@@ -286,6 +320,10 @@ func buildDebugDocument(
 	for i, item := range items {
 		checkpoints = append(checkpoints, toDebugTraceCheckpoint(item, i+1, includeHeaders, includeBodies))
 	}
+	var diffs []debugCheckpointDiff
+	if includeDiff {
+		diffs = buildDebugDiffs(items)
+	}
 
 	return debugDocument{
 		GeneratedAt:     time.Now().UTC(),
@@ -302,6 +340,7 @@ func buildDebugDocument(
 			Checkpoints:       checkpoints,
 			LineageIdentifier: lineageIdentifier,
 		},
+		Diffs: diffs,
 	}, nil
 }
 
@@ -324,6 +363,114 @@ func debugSelectionIdentifier(selection debugSelection) string {
 		return "composite_filter"
 	}
 	return identifier
+}
+
+func buildDebugDiffs(items []*trace.Trace) []debugCheckpointDiff {
+	if len(items) < 2 {
+		return nil
+	}
+	diffs := make([]debugCheckpointDiff, 0, len(items)-1)
+	for i := 1; i < len(items); i++ {
+		prev := items[i-1]
+		curr := items[i]
+		if prev == nil || curr == nil {
+			continue
+		}
+
+		prevMetadata := decodeDebugMetadataMap(prev.Metadata)
+		currMetadata := decodeDebugMetadataMap(curr.Metadata)
+		added, removed, changed := debugMetadataKeyDiff(prevMetadata, currMetadata)
+
+		diff := debugCheckpointDiff{
+			FromCheckpointID:         strings.TrimSpace(prev.ID),
+			ToCheckpointID:           strings.TrimSpace(curr.ID),
+			ProviderChanged:          strings.TrimSpace(prev.Provider) != strings.TrimSpace(curr.Provider),
+			ModelChanged:             strings.TrimSpace(prev.Model) != strings.TrimSpace(curr.Model),
+			RequestMethodChanged:     strings.TrimSpace(prev.RequestMethod) != strings.TrimSpace(curr.RequestMethod),
+			RequestPathChanged:       strings.TrimSpace(prev.RequestPath) != strings.TrimSpace(curr.RequestPath),
+			ResponseStatusChanged:    prev.ResponseStatus != curr.ResponseStatus,
+			InputTokensDelta:         curr.InputTokens - prev.InputTokens,
+			OutputTokensDelta:        curr.OutputTokens - prev.OutputTokens,
+			TotalTokensDelta:         curr.TotalTokens - prev.TotalTokens,
+			LatencyDeltaMS:           curr.LatencyMS - prev.LatencyMS,
+			EstimatedCostDeltaUSD:    curr.EstimatedCostUSD - prev.EstimatedCostUSD,
+			RequestHeadersChanged:    debugHashedString(prev.RequestHeaders) != debugHashedString(curr.RequestHeaders),
+			ResponseHeadersChanged:   debugHashedString(prev.ResponseHeaders) != debugHashedString(curr.ResponseHeaders),
+			RequestBodyChanged:       debugHashedString(prev.RequestBody) != debugHashedString(curr.RequestBody),
+			ResponseBodyChanged:      debugHashedString(prev.ResponseBody) != debugHashedString(curr.ResponseBody),
+			RequestHeadersBytesFrom:  len(prev.RequestHeaders),
+			RequestHeadersBytesTo:    len(curr.RequestHeaders),
+			ResponseHeadersBytesFrom: len(prev.ResponseHeaders),
+			ResponseHeadersBytesTo:   len(curr.ResponseHeaders),
+			RequestBodyBytesFrom:     len(prev.RequestBody),
+			RequestBodyBytesTo:       len(curr.RequestBody),
+			ResponseBodyBytesFrom:    len(prev.ResponseBody),
+			ResponseBodyBytesTo:      len(curr.ResponseBody),
+			MetadataKeysAdded:        added,
+			MetadataKeysRemoved:      removed,
+			MetadataKeysChanged:      changed,
+		}
+		diffs = append(diffs, diff)
+	}
+	return diffs
+}
+
+func debugMetadataKeyDiff(before map[string]any, after map[string]any) ([]string, []string, []string) {
+	if before == nil {
+		before = map[string]any{}
+	}
+	if after == nil {
+		after = map[string]any{}
+	}
+
+	added := make([]string, 0)
+	removed := make([]string, 0)
+	changed := make([]string, 0)
+	keys := make(map[string]struct{}, len(before)+len(after))
+	for key := range before {
+		keys[key] = struct{}{}
+	}
+	for key := range after {
+		keys[key] = struct{}{}
+	}
+
+	sortedKeys := make([]string, 0, len(keys))
+	for key := range keys {
+		sortedKeys = append(sortedKeys, key)
+	}
+	sort.Strings(sortedKeys)
+
+	for _, key := range sortedKeys {
+		beforeValue, beforeOK := before[key]
+		afterValue, afterOK := after[key]
+
+		switch {
+		case !beforeOK && afterOK:
+			added = append(added, key)
+		case beforeOK && !afterOK:
+			removed = append(removed, key)
+		default:
+			if debugValueHash(beforeValue) != debugValueHash(afterValue) {
+				changed = append(changed, key)
+			}
+		}
+	}
+
+	return added, removed, changed
+}
+
+func debugHashedString(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return fmt.Sprintf("%x", sum[:])
+}
+
+func debugValueHash(value any) string {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return fmt.Sprintf("%T:%v", value, value)
+	}
+	sum := sha256.Sum256(encoded)
+	return fmt.Sprintf("%x", sum[:])
 }
 
 func queryDebugChainItems(ctx context.Context, store trace.TraceStore, filter trace.TraceFilter, totalLimit int) ([]*trace.Trace, bool, error) {
@@ -559,18 +706,18 @@ func debugMetadataBool(metadata map[string]any, key string) (bool, bool) {
 	return false, false
 }
 
-func writeDebug(out io.Writer, format string, document debugDocument, includeHeaders bool, includeBodies bool) error {
+func writeDebug(out io.Writer, format string, document debugDocument, includeHeaders bool, includeBodies bool, includeDiff bool) error {
 	switch format {
 	case "json":
 		encoder := json.NewEncoder(out)
 		encoder.SetIndent("", "  ")
 		return encoder.Encode(document)
 	default:
-		return writeDebugText(out, document, includeHeaders, includeBodies)
+		return writeDebugText(out, document, includeHeaders, includeBodies, includeDiff)
 	}
 }
 
-func writeDebugText(out io.Writer, document debugDocument, includeHeaders bool, includeBodies bool) error {
+func writeDebugText(out io.Writer, document debugDocument, includeHeaders bool, includeBodies bool, includeDiff bool) error {
 	fmt.Fprintln(out, "OngoingAI Debug Chain")
 
 	meta := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
@@ -627,6 +774,50 @@ func writeDebugText(out io.Writer, document debugDocument, includeHeaders bool, 
 			}
 			if strings.TrimSpace(checkpoint.ResponseBody) != "" {
 				fmt.Fprintf(out, "response_body: %s\n", checkpoint.ResponseBody)
+			}
+		}
+	}
+
+	if includeDiff {
+		fmt.Fprintln(out, "\nDiffs")
+		if len(document.Diffs) == 0 {
+			fmt.Fprintln(out, "(no checkpoint diffs)")
+			return nil
+		}
+
+		diffWriter := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(diffWriter, "FROM\tTO\tTOTAL_TOKENS_DELTA\tLATENCY_DELTA_MS\tPATH_CHANGED\tMODEL_CHANGED\tSTATUS_CHANGED\tREQUEST_BODY_CHANGED\tRESPONSE_BODY_CHANGED\tMETADATA_KEYS_CHANGED")
+		for _, diff := range document.Diffs {
+			fmt.Fprintf(
+				diffWriter,
+				"%s\t%s\t%d\t%d\t%t\t%t\t%t\t%t\t%t\t%d\n",
+				diff.FromCheckpointID,
+				diff.ToCheckpointID,
+				diff.TotalTokensDelta,
+				diff.LatencyDeltaMS,
+				diff.RequestPathChanged,
+				diff.ModelChanged,
+				diff.ResponseStatusChanged,
+				diff.RequestBodyChanged,
+				diff.ResponseBodyChanged,
+				len(diff.MetadataKeysChanged),
+			)
+		}
+		if err := diffWriter.Flush(); err != nil {
+			return err
+		}
+
+		for _, diff := range document.Diffs {
+			if len(diff.MetadataKeysAdded) == 0 && len(diff.MetadataKeysRemoved) == 0 && len(diff.MetadataKeysChanged) == 0 {
+				continue
+			}
+			fmt.Fprintf(out, "\nDiff %s -> %s metadata keys\n", diff.FromCheckpointID, diff.ToCheckpointID)
+			metaDiff := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+			fmt.Fprintf(metaDiff, "added\t%s\n", strings.Join(diff.MetadataKeysAdded, ","))
+			fmt.Fprintf(metaDiff, "removed\t%s\n", strings.Join(diff.MetadataKeysRemoved, ","))
+			fmt.Fprintf(metaDiff, "changed\t%s\n", strings.Join(diff.MetadataKeysChanged, ","))
+			if err := metaDiff.Flush(); err != nil {
+				return err
 			}
 		}
 	}
