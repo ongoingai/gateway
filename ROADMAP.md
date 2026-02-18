@@ -20,6 +20,7 @@ This roadmap is organized as priority-ordered phases.
 
 - Phase 0: Completed (15/15)
 - Phase 1: Completed (20/20)
+- Phase 2: Planned (0/16)
 
 ## Phase 0: Foundation And Initial Setup (Completed)
 
@@ -90,6 +91,40 @@ Exit criteria:
 6. API and config contracts are documented and stable.
 7. Self-hosting guide covers setup, configuration, storage driver selection, and basic troubleshooting.
 8. Write-path architecture allows backend transition (direct DB -> ingest service) with minimal gateway surface changes.
+
+## Phase 2: Debugging, Development Velocity, And Trace Intelligence (Planned)
+
+Focus: make local and production troubleshooting faster while improving trace fidelity, lineage clarity, and day-to-day developer workflows.
+
+Planned work:
+
+- [ ] Ship offline-first CLI debugging workflow as a first-class operator path (`report` and `debug`) so post-incident analysis does not depend on a live gateway process.
+- [ ] Add focused trace drill-down CLI commands for direct trace inspection by `trace_id`, `trace_group_id`, `thread_id`, and `run_id`.
+- [ ] Add redaction-safe checkpoint diff tooling to compare trace request/response/metadata changes across lineage steps.
+- [ ] Add reproducible debug bundle export (`json` + metadata manifest) for support escalation and CI artifact capture.
+- [ ] Add CLI filtering and output controls for scripting (`--format json`, deterministic ordering, stable field contracts).
+- [ ] Add a local developer diagnostics command (`dev doctor`) to validate config, storage connectivity, route wiring, and auth posture in one pass.
+- [ ] Publish deterministic local demo/test harnesses with mock OpenAI/Anthropic upstreams for repeatable debugging demos.
+- [ ] Add end-to-end tests that assert report/debug outputs against seeded trace fixtures for SQLite and Postgres.
+- [ ] Strengthen lineage reconstruction guarantees for out-of-order writes and partial lineage metadata.
+- [ ] Improve streaming trace assembly coverage for malformed chunks, partial usage payloads, and mixed provider event formats.
+- [ ] Record explicit upstream failure classification and retry context in trace metadata to speed root-cause analysis.
+- [ ] Add correlation identifiers across logs, OpenTelemetry spans, and stored traces for one-hop pivoting during incidents.
+- [ ] Add explicit queue-pressure and dropped-trace diagnostics surfaces suitable for both API and CLI consumption.
+- [ ] Optimize trace query/index strategy for lineage-heavy debugging queries in both SQLite and Postgres backends.
+- [ ] Add performance guardrails and benchmarks for trace capture/debug instrumentation overhead on proxy hot paths.
+- [ ] Expand operational playbooks for incident triage, lineage replay/fork workflows, and redaction-policy debugging.
+
+Exit criteria:
+
+1. Operators can generate actionable report + debug-chain output from local storage with the gateway process offline.
+2. Debug outputs are deterministic and scriptable across SQLite and Postgres backends.
+3. Trace chain queries (`trace_group_id`/`thread_id`/`run_id`) remain tenant-scoped and auditable.
+4. Regression tests cover report/debug workflows, lineage reconstruction, and streaming edge cases.
+5. Correlation identifiers reliably connect logs, spans, and persisted traces for the same request lifecycle.
+6. Queue-pressure and dropped-trace diagnostics are observable without inspecting raw database tables.
+7. Benchmark baselines show added debugging/tracing instrumentation does not materially regress proxy latency targets.
+8. Documentation includes practical operator runbooks for local debugging and production incident response.
 
 ## What's Next
 
