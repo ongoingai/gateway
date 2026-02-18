@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -378,6 +379,177 @@ func TestWriterShutdownCancelsInflightWriteOnTimeout(t *testing.T) {
 	if err := writer.Shutdown(finalCtx); err != nil {
 		t.Fatalf("shutdown after cancellation err=%v, want nil", err)
 	}
+}
+
+func TestWriterMetricsOnEnqueueCalledOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	store := &testStore{}
+	writer := NewWriter(store, 8)
+	writer.Start(context.Background())
+
+	var enqueueCount int64
+	writer.SetMetrics(&WriterMetrics{
+		OnEnqueue: func() { atomic.AddInt64(&enqueueCount, 1) },
+	})
+
+	for i := 0; i < 5; i++ {
+		if !writer.Enqueue(&Trace{ID: "trace"}) {
+			t.Fatalf("enqueue failed at index %d", i)
+		}
+	}
+	writer.Stop()
+
+	if got := atomic.LoadInt64(&enqueueCount); got != 5 {
+		t.Fatalf("OnEnqueue count=%d, want 5", got)
+	}
+}
+
+func TestWriterMetricsOnDropCalledWhenQueueFull(t *testing.T) {
+	t.Parallel()
+
+	store := &blockingStore{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	writer := NewWriter(store, 1)
+	writer.Start(context.Background())
+
+	var dropCount int64
+	writer.SetMetrics(&WriterMetrics{
+		OnDrop: func() { atomic.AddInt64(&dropCount, 1) },
+	})
+
+	// First enqueue: consumed by the worker goroutine.
+	if !writer.Enqueue(&Trace{ID: "trace-1"}) {
+		t.Fatal("first enqueue unexpectedly failed")
+	}
+
+	select {
+	case <-store.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first write to block")
+	}
+
+	// Second enqueue: fills the buffer (size 1).
+	if !writer.Enqueue(&Trace{ID: "trace-2"}) {
+		t.Fatal("second enqueue unexpectedly failed")
+	}
+
+	// Third enqueue: should drop.
+	if writer.Enqueue(&Trace{ID: "trace-3"}) {
+		t.Fatal("third enqueue should fail when queue is full")
+	}
+
+	close(store.release)
+	writer.Stop()
+
+	if got := atomic.LoadInt64(&dropCount); got != 1 {
+		t.Fatalf("OnDrop count=%d, want 1", got)
+	}
+}
+
+func TestWriterMetricsOnFlushCalledWithBatchSizeAndDuration(t *testing.T) {
+	t.Parallel()
+
+	store := &testStore{}
+	writer := NewWriter(store, 8)
+
+	type flushRecord struct {
+		batchSize int
+		duration  time.Duration
+	}
+	var mu sync.Mutex
+	var flushes []flushRecord
+	writer.SetMetrics(&WriterMetrics{
+		OnFlush: func(batchSize int, duration time.Duration) {
+			mu.Lock()
+			flushes = append(flushes, flushRecord{batchSize: batchSize, duration: duration})
+			mu.Unlock()
+		},
+	})
+
+	writer.Start(context.Background())
+	for i := 0; i < 4; i++ {
+		if !writer.Enqueue(&Trace{ID: "trace"}) {
+			t.Fatalf("enqueue failed at index %d", i)
+		}
+	}
+	writer.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(flushes) == 0 {
+		t.Fatal("expected at least one OnFlush call")
+	}
+	totalFlushed := 0
+	for _, f := range flushes {
+		if f.batchSize <= 0 {
+			t.Fatalf("flush batchSize=%d, want >0", f.batchSize)
+		}
+		if f.duration < 0 {
+			t.Fatalf("flush duration=%v, want >=0", f.duration)
+		}
+		totalFlushed += f.batchSize
+	}
+	if totalFlushed != 4 {
+		t.Fatalf("total flushed=%d, want 4", totalFlushed)
+	}
+}
+
+func TestWriterMetricsNilSafe(t *testing.T) {
+	t.Parallel()
+
+	store := &testStore{}
+	writer := NewWriter(store, 8)
+	// Do not call SetMetrics — ensure no panics with nil metrics.
+	writer.Start(context.Background())
+
+	for i := 0; i < 3; i++ {
+		writer.Enqueue(&Trace{ID: "trace"})
+	}
+	writer.Stop()
+
+	if got := store.Count(); got != 3 {
+		t.Fatalf("write count=%d, want 3", got)
+	}
+}
+
+func TestWriterQueueLen(t *testing.T) {
+	t.Parallel()
+
+	store := &blockingStore{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	writer := NewWriter(store, 4)
+	writer.Start(context.Background())
+
+	// Enqueue one to trigger the worker and block it.
+	if !writer.Enqueue(&Trace{ID: "trace-1"}) {
+		t.Fatal("first enqueue failed")
+	}
+
+	select {
+	case <-store.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first write to block")
+	}
+
+	// The worker consumed the first trace; these 2 remain in the channel buffer.
+	if !writer.Enqueue(&Trace{ID: "trace-2"}) {
+		t.Fatal("second enqueue failed")
+	}
+	if !writer.Enqueue(&Trace{ID: "trace-3"}) {
+		t.Fatal("third enqueue failed")
+	}
+
+	if got := writer.QueueLen(); got != 2 {
+		t.Fatalf("QueueLen()=%d, want 2", got)
+	}
+
+	close(store.release)
+	writer.Stop()
 }
 
 func TestWriterStopIsIdempotentWithoutStart(t *testing.T) {

@@ -442,6 +442,9 @@ func TestRuntimeGuardsDoNotPanic(t *testing.T) {
 
 			tt.runtime.RecordTraceQueueDrop("/openai/v1/chat", 502)
 			tt.runtime.RecordTraceWriteFailure("write_trace", 5)
+			tt.runtime.RecordTraceEnqueued()
+			tt.runtime.RecordTraceFlush(10, 50*time.Millisecond)
+			tt.runtime.RegisterTraceQueueDepthGauge(func() int { return 0 })
 
 			if err := tt.runtime.Shutdown(context.Background()); err != nil {
 				t.Fatalf("Shutdown() error: %v", err)
@@ -571,5 +574,58 @@ func TestSetupConfigPermutations(t *testing.T) {
 		if traceRequests.Load() > 0 {
 			t.Fatal("unexpected trace export requests when TracesEnabled=false")
 		}
+	})
+}
+
+// Cannot be parallel: mutates global OTel providers.
+func TestRecordTraceEnqueuedAndFlushMetrics(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	oldMP := otel.GetMeterProvider()
+	oldProp := otel.GetTextMapPropagator()
+	defer func() {
+		otel.SetTracerProvider(oldTP)
+		otel.SetMeterProvider(oldMP)
+		otel.SetTextMapPropagator(oldProp)
+	}()
+
+	var metricRequests atomic.Int64
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		if r.URL.Path == "/v1/metrics" {
+			metricRequests.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
+	runtime, err := Setup(context.Background(), config.OTelConfig{
+		Enabled:                true,
+		Endpoint:               collector.URL,
+		ServiceName:            "test-trace-pipeline-metrics",
+		TracesEnabled:          false,
+		MetricsEnabled:         true,
+		SamplingRatio:          1.0,
+		ExportTimeoutMS:        1000,
+		MetricExportIntervalMS: 25,
+	}, "test", nil)
+	if err != nil {
+		t.Fatalf("Setup() error: %v", err)
+	}
+
+	// Exercise all new recording methods.
+	runtime.RecordTraceEnqueued()
+	runtime.RecordTraceEnqueued()
+	runtime.RecordTraceFlush(5, 10*time.Millisecond)
+	runtime.RegisterTraceQueueDepthGauge(func() int { return 3 })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := runtime.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error: %v", err)
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		return metricRequests.Load() > 0
 	})
 }

@@ -56,6 +56,14 @@ type traceWriteFailureHandlerSetter interface {
 	SetWriteFailureHandler(handler trace.WriteFailureHandler)
 }
 
+type traceWriterMetricsSetter interface {
+	SetMetrics(m *trace.WriterMetrics)
+}
+
+type traceWriterQueueLenProvider interface {
+	QueueLen() int
+}
+
 var newTraceWriter = func(store trace.TraceStore, bufferSize int) asyncTraceWriter {
 	return trace.NewWriter(store, bufferSize)
 }
@@ -367,6 +375,7 @@ func runServe(args []string) int {
 		fmt.Fprintf(os.Stderr, "unsupported storage.driver %q\n", cfg.Storage.Driver)
 		return 1
 	}
+	attachTraceWriterMetrics(traceWriter, otelRuntime)
 	attachTraceWriterFailureLogging(logger, traceWriter, func(failure trace.WriteFailure) {
 		if otelRuntime != nil {
 			otelRuntime.RecordTraceWriteFailure(failure.Operation, failure.FailedCount)
@@ -805,6 +814,27 @@ func shutdownTraceWriter(logger *slog.Logger, writer asyncTraceWriter, timeout t
 	if logger != nil {
 		logger.Info("flushed pending traces before shutdown", "duration_ms", time.Since(start).Milliseconds())
 	}
+}
+
+func attachTraceWriterMetrics(writer asyncTraceWriter, otelRuntime *observability.Runtime) {
+	if writer == nil || otelRuntime == nil || !otelRuntime.Enabled() {
+		return
+	}
+
+	if qlp, ok := writer.(traceWriterQueueLenProvider); ok {
+		otelRuntime.RegisterTraceQueueDepthGauge(qlp.QueueLen)
+	}
+
+	ms, ok := writer.(traceWriterMetricsSetter)
+	if !ok {
+		return
+	}
+	ms.SetMetrics(&trace.WriterMetrics{
+		OnEnqueue: otelRuntime.RecordTraceEnqueued,
+		OnFlush:   otelRuntime.RecordTraceFlush,
+		// OnDrop left nil: the captureSink already calls RecordTraceQueueDrop
+		// with richer route/status attributes.
+	})
 }
 
 func attachTraceWriterFailureLogging(logger *slog.Logger, writer asyncTraceWriter, onFailure func(trace.WriteFailure)) {

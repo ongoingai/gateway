@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const writerBatchSize = 64
@@ -22,6 +23,16 @@ type WriteFailureHandler func(WriteFailure)
 
 var noopWriteFailureHandler = WriteFailureHandler(func(WriteFailure) {})
 
+// WriterMetrics holds optional callbacks the Writer invokes at key pipeline points.
+type WriterMetrics struct {
+	// OnEnqueue is called each time a trace is successfully placed on the queue.
+	OnEnqueue func()
+	// OnDrop is called each time a trace is dropped because the queue is full.
+	OnDrop func()
+	// OnFlush is called after each batch is flushed to storage.
+	OnFlush func(batchSize int, duration time.Duration)
+}
+
 type Writer struct {
 	store TraceStore
 	queue chan *Trace
@@ -36,6 +47,7 @@ type Writer struct {
 	lifecycleMu        sync.RWMutex
 	workerCancel       context.CancelFunc
 	writeFailureHandle atomic.Value // WriteFailureHandler
+	metrics            atomic.Value // *WriterMetrics
 }
 
 func NewWriter(store TraceStore, bufferSize int) *Writer {
@@ -61,6 +73,30 @@ func (w *Writer) SetWriteFailureHandler(handler WriteFailureHandler) {
 		handler = noopWriteFailureHandler
 	}
 	w.writeFailureHandle.Store(handler)
+}
+
+// SetMetrics replaces the metric callbacks used by the writer pipeline.
+func (w *Writer) SetMetrics(m *WriterMetrics) {
+	if w == nil {
+		return
+	}
+	if m == nil {
+		m = &WriterMetrics{}
+	}
+	w.metrics.Store(m)
+}
+
+func (w *Writer) loadMetrics() *WriterMetrics {
+	m, _ := w.metrics.Load().(*WriterMetrics)
+	return m
+}
+
+// QueueLen returns the current number of items waiting in the write queue.
+func (w *Writer) QueueLen() int {
+	if w == nil {
+		return 0
+	}
+	return len(w.queue)
 }
 
 func (w *Writer) Start(ctx context.Context) {
@@ -130,8 +166,14 @@ func (w *Writer) Enqueue(t *Trace) bool {
 
 	select {
 	case w.queue <- t:
+		if m := w.loadMetrics(); m != nil && m.OnEnqueue != nil {
+			m.OnEnqueue()
+		}
 		return true
 	default:
+		if m := w.loadMetrics(); m != nil && m.OnDrop != nil {
+			m.OnDrop()
+		}
 		return false
 	}
 }
@@ -199,6 +241,12 @@ func (w *Writer) flushBatch(ctx context.Context, batch []*Trace) {
 	if len(batch) == 0 {
 		return
 	}
+	start := time.Now()
+	defer func() {
+		if m := w.loadMetrics(); m != nil && m.OnFlush != nil {
+			m.OnFlush(len(batch), time.Since(start))
+		}
+	}()
 	if len(batch) == 1 {
 		if err := w.store.WriteTrace(ctx, batch[0]); err != nil {
 			w.reportWriteFailure(WriteFailure{

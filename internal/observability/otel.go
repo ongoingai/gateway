@@ -38,8 +38,11 @@ const (
 type Runtime struct {
 	enabled bool
 
-	traceQueueDroppedCounter metric.Int64Counter
-	traceWriteFailedCounter  metric.Int64Counter
+	traceQueueDroppedCounter     metric.Int64Counter
+	traceWriteFailedCounter      metric.Int64Counter
+	traceEnqueuedCounter         metric.Int64Counter
+	traceFlushLatencyHistogram   metric.Float64Histogram
+	traceBatchSizeHistogram      metric.Int64Histogram
 
 	shutdownFns []func(context.Context) error
 }
@@ -142,6 +145,34 @@ func Setup(ctx context.Context, cfg config.OTelConfig, serviceVersion string, lo
 		logger.Warn("failed to create opentelemetry counter", "metric", "ongoingai.trace.write_failed_total", "error", metricErr)
 	}
 	runtime.traceWriteFailedCounter = traceWriteFailedCounter
+
+	traceEnqueuedCounter, metricErr := meter.Int64Counter(
+		"ongoingai.trace.enqueued_total",
+		metric.WithDescription("Count of traces successfully enqueued to the async write queue."),
+	)
+	if metricErr != nil && logger != nil {
+		logger.Warn("failed to create opentelemetry counter", "metric", "ongoingai.trace.enqueued_total", "error", metricErr)
+	}
+	runtime.traceEnqueuedCounter = traceEnqueuedCounter
+
+	traceFlushLatencyHistogram, metricErr := meter.Float64Histogram(
+		"ongoingai.trace.flush_duration_seconds",
+		metric.WithDescription("Time to flush a batch of traces to storage."),
+		metric.WithUnit("s"),
+	)
+	if metricErr != nil && logger != nil {
+		logger.Warn("failed to create opentelemetry histogram", "metric", "ongoingai.trace.flush_duration_seconds", "error", metricErr)
+	}
+	runtime.traceFlushLatencyHistogram = traceFlushLatencyHistogram
+
+	traceBatchSizeHistogram, metricErr := meter.Int64Histogram(
+		"ongoingai.trace.flush_batch_size",
+		metric.WithDescription("Number of traces per flush batch."),
+	)
+	if metricErr != nil && logger != nil {
+		logger.Warn("failed to create opentelemetry histogram", "metric", "ongoingai.trace.flush_batch_size", "error", metricErr)
+	}
+	runtime.traceBatchSizeHistogram = traceBatchSizeHistogram
 
 	runtime.enabled = true
 	if logger != nil {
@@ -267,6 +298,51 @@ func (r *Runtime) RecordTraceWriteFailure(operation string, failedCount int) {
 		int64(failedCount),
 		metric.WithAttributes(attribute.String("operation", strings.TrimSpace(operation))),
 	)
+}
+
+// RecordTraceEnqueued increments a counter when a trace is successfully enqueued.
+func (r *Runtime) RecordTraceEnqueued() {
+	if !r.Enabled() || r.traceEnqueuedCounter == nil {
+		return
+	}
+	r.traceEnqueuedCounter.Add(context.Background(), 1)
+}
+
+// RecordTraceFlush records a batch flush event with its size and duration.
+func (r *Runtime) RecordTraceFlush(batchSize int, duration time.Duration) {
+	if !r.Enabled() || batchSize <= 0 {
+		return
+	}
+	ctx := context.Background()
+	if r.traceBatchSizeHistogram != nil {
+		r.traceBatchSizeHistogram.Record(ctx, int64(batchSize))
+	}
+	if r.traceFlushLatencyHistogram != nil {
+		r.traceFlushLatencyHistogram.Record(ctx, duration.Seconds())
+	}
+}
+
+// RegisterTraceQueueDepthGauge registers an async gauge that reports the
+// current trace write queue depth each collection cycle.
+func (r *Runtime) RegisterTraceQueueDepthGauge(queueLenFn func() int) {
+	if !r.Enabled() || queueLenFn == nil {
+		return
+	}
+	meter := otel.Meter(instrumentationName)
+	gauge, err := meter.Int64ObservableGauge(
+		"ongoingai.trace.queue_depth",
+		metric.WithDescription("Current number of traces waiting in the async write queue."),
+	)
+	if err != nil {
+		return
+	}
+	_, err = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		o.ObserveInt64(gauge, int64(queueLenFn()))
+		return nil
+	}, gauge)
+	if err != nil {
+		return
+	}
 }
 
 // Shutdown flushes and stops OpenTelemetry providers.
