@@ -189,6 +189,8 @@ func run(args []string) int {
 		return runReport(args[1:], os.Stdout, os.Stderr)
 	case "debug":
 		return runDebug(args[1:], os.Stdout, os.Stderr)
+	case "doctor":
+		return runDoctor(args[1:], os.Stdout, os.Stderr)
 	default:
 		printUsage(os.Stderr)
 		return 2
@@ -622,6 +624,7 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  ongoingai wrap [--config path/to/ongoingai.yaml] -- <command> [args...]")
 	fmt.Fprintln(out, "  ongoingai report [--config path/to/ongoingai.yaml] [--format text|json] [--from RFC3339|YYYY-MM-DD] [--to RFC3339|YYYY-MM-DD] [--provider NAME] [--model NAME] [--limit N]")
 	fmt.Fprintln(out, "  ongoingai debug [last] [--config path/to/ongoingai.yaml] [--trace-id ID] [--trace-group-id ID] [--thread-id ID] [--run-id ID] [--format text|json] [--limit N] [--diff] [--bundle-out PATH] [--include-headers] [--include-bodies]")
+	fmt.Fprintln(out, "  ongoingai doctor [--config path/to/ongoingai.yaml] [--format text|json]")
 }
 
 func printConfigUsage(out io.Writer) {
