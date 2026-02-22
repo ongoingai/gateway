@@ -22,13 +22,16 @@ It covers current export surfaces and practical pull-based integration patterns.
 - Optionally exports gateway spans and metrics with native OpenTelemetry OTLP HTTP.
 - Exposes a native Prometheus `/metrics` scrape endpoint when
   `prometheus_enabled: true`.
-- OpenTelemetry spans include gateway tenant identity attributes (`org_id`,
-  `workspace_id`, `key_id`) when auth is enabled.
+- OpenTelemetry spans and metrics use normalized request-scope attributes:
+  `provider`, `model`, `org_id`, `workspace_id`, and `route`.
+- When auth is enabled and identity is present, spans also include `key_id`
+  and `role`.
 - Supports browser-based integration clients with CORS headers on API routes.
 
 ## Operational fit
 
-- You need external usage and cost dashboards from gateway trace data.
+- You need external usage, cost, latency, and error dashboards from gateway
+  trace data.
 - You need centralized audit and auth-deny visibility in your log pipeline.
 - You need export behavior that does not block proxy request forwarding.
 
@@ -37,7 +40,8 @@ It covers current export surfaces and practical pull-based integration patterns.
 1. Proxy traffic is captured and written asynchronously to trace storage.
 2. API routes under `/api/...` read from storage and return JSON responses.
 3. `/api/traces` supports filtered and cursor-based pull exports.
-4. `/api/analytics/*` exposes usage, cost, model, key, and summary aggregates.
+4. `/api/analytics/*` exposes usage, cost, model, key, latency, error-rate, and
+   summary aggregates.
 5. Gateway logs are emitted as JSON lines to stdout and can be shipped by your
    log collector.
 6. If `auth.enabled=true`, integration readers must use a gateway key with

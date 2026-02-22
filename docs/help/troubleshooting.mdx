@@ -142,13 +142,14 @@ Run the following checks in order before you debug individual endpoints.
 - Fix: Use supported ranges and time formats. Ensure `to >= from` and
   `max_tokens >= min_tokens`.
 
-### `/api/analytics/*` returns `400` for series options
+### `/api/analytics/*` returns `400` for query options
 
-- Symptom: Usage or cost analytics request fails with query validation
-  errors.
+- Symptom: Usage, cost, latency, or error analytics request fails with query
+  validation errors.
 - Cause: Unsupported `group_by` or `bucket`, or invalid date range.
-- Fix: Use `group_by=provider|model` and `bucket=hour|day|week`.
-  Ensure `to >= from`.
+- Fix: For usage/cost, use `group_by=provider|model` and `bucket=hour|day|week`.
+  For latency/errors, use `group_by=provider|model|route|key`. Ensure
+  `to >= from`.
 
 ### `/api/traces/:id` returns `404 trace not found` for known ID
 

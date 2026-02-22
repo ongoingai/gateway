@@ -291,6 +291,12 @@ curl "http://localhost:8080/api/analytics/summary?from=2026-02-01&to=2026-02-14"
 
 curl "http://localhost:8080/api/analytics/usage?group_by=provider&bucket=day" \
   -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
+
+curl "http://localhost:8080/api/analytics/latency?group_by=route" \
+  -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
+
+curl "http://localhost:8080/api/analytics/errors?group_by=key" \
+  -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
 ```
 
 ### Gateway keys
