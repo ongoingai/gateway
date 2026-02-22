@@ -241,18 +241,12 @@ func runDebug(args []string, out io.Writer, errOut io.Writer) int {
 		return 1
 	}
 
-	store, err := openReportTraceStore(cfg)
+	store, err := openTraceStore(cfg)
 	if err != nil {
 		fmt.Fprintf(errOut, "failed to initialize trace store: %v\n", err)
 		return 1
 	}
-	if closer, ok := store.(interface{ Close() error }); ok {
-		defer func() {
-			if err := closer.Close(); err != nil {
-				fmt.Fprintf(errOut, "warning: failed to close trace store: %v\n", err)
-			}
-		}()
-	}
+	defer closeTraceStoreWithWarning(store, errOut)
 
 	if explicitLast {
 		selection = debugSelection{}

@@ -135,7 +135,7 @@ func doctorSkippedCheck(name, summary string) doctorCheck {
 
 func runDoctorStorageCheck(cfg config.Config) doctorCheck {
 	check := doctorCheck{Name: "storage"}
-	store, err := openReportTraceStore(cfg)
+	store, err := openTraceStore(cfg)
 	if err != nil {
 		check.Status = doctorStatusFail
 		check.Summary = "failed to initialize trace storage"
@@ -313,16 +313,6 @@ func countProtectedAuthorizationRules(rules []auth.AuthorizationRule) int {
 		}
 	}
 	return count
-}
-
-func closeTraceStore(store trace.TraceStore) error {
-	if store == nil {
-		return nil
-	}
-	if closer, ok := store.(interface{ Close() error }); ok {
-		return closer.Close()
-	}
-	return nil
 }
 
 func prefixesOverlap(left, right string) bool {

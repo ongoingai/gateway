@@ -150,18 +150,12 @@ func runReport(args []string, out io.Writer, errOut io.Writer) int {
 		return 1
 	}
 
-	store, err := openReportTraceStore(cfg)
+	store, err := openTraceStore(cfg)
 	if err != nil {
 		fmt.Fprintf(errOut, "failed to initialize trace store: %v\n", err)
 		return 1
 	}
-	if closer, ok := store.(interface{ Close() error }); ok {
-		defer func() {
-			if err := closer.Close(); err != nil {
-				fmt.Fprintf(errOut, "warning: failed to close trace store: %v\n", err)
-			}
-		}()
-	}
+	defer closeTraceStoreWithWarning(store, errOut)
 
 	analyticsFilter := trace.AnalyticsFilter{
 		Provider: strings.TrimSpace(*provider),
@@ -189,17 +183,6 @@ func runReport(args []string, out io.Writer, errOut io.Writer) int {
 	}
 
 	return 0
-}
-
-func openReportTraceStore(cfg config.Config) (trace.TraceStore, error) {
-	switch strings.TrimSpace(cfg.Storage.Driver) {
-	case "sqlite":
-		return trace.NewSQLiteStore(cfg.Storage.Path)
-	case "postgres":
-		return trace.NewPostgresStore(cfg.Storage.DSN)
-	default:
-		return nil, fmt.Errorf("unsupported storage.driver %q", cfg.Storage.Driver)
-	}
 }
 
 func parseReportTime(raw string, endOfDay bool) (time.Time, error) {
