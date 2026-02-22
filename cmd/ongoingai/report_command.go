@@ -359,12 +359,17 @@ func buildReport(
 	sortReportKeyRows(keyRows)
 	sortReportRecentRows(recentRows)
 
+	storagePath := ""
+	if strings.TrimSpace(cfg.Storage.Driver) == "sqlite" {
+		storagePath = cfg.Storage.Path
+	}
+
 	return reportDocument{
 		SchemaVersion: reportSchemaVersion,
 		GeneratedAt:   time.Now().UTC(),
 		Storage: reportStorageInfo{
 			Driver: cfg.Storage.Driver,
-			Path:   cfg.Storage.Path,
+			Path:   storagePath,
 		},
 		Filters: reportFilterInfo{
 			Provider: analyticsFilter.Provider,
@@ -596,3 +601,4 @@ func reportOptionalTime(value time.Time) *time.Time {
 	utc := value.UTC()
 	return &utc
 }
+
