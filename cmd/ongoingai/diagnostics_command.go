@@ -12,7 +12,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/ongoingai/gateway/internal/config"
 	"github.com/ongoingai/gateway/internal/trace"
 )
 
@@ -57,12 +56,9 @@ func runDiagnostics(args []string, out io.Writer, errOut io.Writer) int {
 		return 2
 	}
 
-	normalizedFormat := strings.ToLower(strings.TrimSpace(*format))
-	if normalizedFormat == "" {
-		normalizedFormat = defaultDiagnosticsFormat
-	}
-	if normalizedFormat != "text" && normalizedFormat != "json" {
-		fmt.Fprintf(errOut, "invalid diagnostics format %q: expected text or json\n", *format)
+	normalizedFormat, err := normalizeTextJSONFormat("diagnostics", *format, defaultDiagnosticsFormat)
+	if err != nil {
+		fmt.Fprintln(errOut, err.Error())
 		return 2
 	}
 	if *timeout <= 0 {
@@ -94,23 +90,20 @@ func resolveDiagnosticsConnection(configPath, baseURL, authHeader string) (strin
 	needsConfig := resolvedBaseURL == "" || resolvedAuthHeader == ""
 
 	if needsConfig {
-		cfg, err := config.Load(configPath)
+		cfg, stage, err := loadAndValidateConfig(configPath)
 		if err != nil {
 			if resolvedBaseURL == "" {
-				return "", "", fmt.Errorf("load config: %w", err)
+				if stage == configStageLoad {
+					return "", "", fmt.Errorf("load config: %w", err)
+				}
+				return "", "", fmt.Errorf("config validation failed: %w", err)
 			}
 		} else {
-			if err := config.Validate(cfg); err != nil {
-				if resolvedBaseURL == "" {
-					return "", "", fmt.Errorf("config validation failed: %w", err)
-				}
-			} else {
-				if resolvedBaseURL == "" {
-					resolvedBaseURL = gatewayBaseURL(cfg)
-				}
-				if resolvedAuthHeader == "" {
-					resolvedAuthHeader = strings.TrimSpace(cfg.Auth.Header)
-				}
+			if resolvedBaseURL == "" {
+				resolvedBaseURL = gatewayBaseURL(cfg)
+			}
+			if resolvedAuthHeader == "" {
+				resolvedAuthHeader = strings.TrimSpace(cfg.Auth.Header)
 			}
 		}
 	}

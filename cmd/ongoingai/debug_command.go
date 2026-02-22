@@ -16,7 +16,6 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/ongoingai/gateway/internal/config"
 	"github.com/ongoingai/gateway/internal/trace"
 )
 
@@ -222,12 +221,9 @@ func runDebug(args []string, out io.Writer, errOut io.Writer) int {
 		return 2
 	}
 
-	normalizedFormat := strings.ToLower(strings.TrimSpace(*format))
-	if normalizedFormat == "" {
-		normalizedFormat = defaultDebugFormat
-	}
-	if normalizedFormat != "text" && normalizedFormat != "json" {
-		fmt.Fprintf(errOut, "invalid debug format %q: expected text or json\n", *format)
+	normalizedFormat, err := normalizeTextJSONFormat("debug", *format, defaultDebugFormat)
+	if err != nil {
+		fmt.Fprintln(errOut, err.Error())
 		return 2
 	}
 	if *limit <= 0 || *limit > maxDebugLimit {
@@ -235,13 +231,13 @@ func runDebug(args []string, out io.Writer, errOut io.Writer) int {
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, stage, err := loadAndValidateConfig(*configPath)
 	if err != nil {
-		fmt.Fprintf(errOut, "failed to load config: %v\n", err)
-		return 1
-	}
-	if err := config.Validate(cfg); err != nil {
-		fmt.Fprintf(errOut, "config is invalid: %v\n", err)
+		if stage == configStageLoad {
+			fmt.Fprintf(errOut, "failed to load config: %v\n", err)
+		} else {
+			fmt.Fprintf(errOut, "config is invalid: %v\n", err)
+		}
 		return 1
 	}
 

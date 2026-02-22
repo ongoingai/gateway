@@ -57,12 +57,9 @@ func runDoctor(args []string, out io.Writer, errOut io.Writer) int {
 		return 2
 	}
 
-	normalizedFormat := strings.ToLower(strings.TrimSpace(*format))
-	if normalizedFormat == "" {
-		normalizedFormat = defaultDoctorFormat
-	}
-	if normalizedFormat != "text" && normalizedFormat != "json" {
-		fmt.Fprintf(errOut, "invalid doctor format %q: expected text or json\n", *format)
+	normalizedFormat, err := normalizeTextJSONFormat("doctor", *format, defaultDoctorFormat)
+	if err != nil {
+		fmt.Fprintln(errOut, err.Error())
 		return 2
 	}
 
@@ -84,35 +81,33 @@ func buildDoctorDocument(configPath string) doctorDocument {
 		Checks:      make([]doctorCheck, 0, 4),
 	}
 
-	cfg, err := config.Load(configPath)
+	cfg, stage, err := loadAndValidateConfig(configPath)
 	if err != nil {
-		doc.Checks = append(doc.Checks,
-			doctorCheck{
-				Name:    "config",
-				Status:  doctorStatusFail,
-				Summary: "failed to load config",
-				Details: []string{err.Error()},
-			},
-			doctorSkippedCheck("storage", "skipped: config failed to load"),
-			doctorSkippedCheck("route_wiring", "skipped: config failed to load"),
-			doctorSkippedCheck("auth_posture", "skipped: config failed to load"),
-		)
-		doc.OverallStatus = doctorOverallStatus(doc.Checks)
-		return doc
-	}
-
-	if err := config.Validate(cfg); err != nil {
-		doc.Checks = append(doc.Checks,
-			doctorCheck{
-				Name:    "config",
-				Status:  doctorStatusFail,
-				Summary: "config is invalid",
-				Details: []string{err.Error()},
-			},
-			doctorSkippedCheck("storage", "skipped: config validation failed"),
-			doctorSkippedCheck("route_wiring", "skipped: config validation failed"),
-			doctorSkippedCheck("auth_posture", "skipped: config validation failed"),
-		)
+		if stage == configStageLoad {
+			doc.Checks = append(doc.Checks,
+				doctorCheck{
+					Name:    "config",
+					Status:  doctorStatusFail,
+					Summary: "failed to load config",
+					Details: []string{err.Error()},
+				},
+				doctorSkippedCheck("storage", "skipped: config failed to load"),
+				doctorSkippedCheck("route_wiring", "skipped: config failed to load"),
+				doctorSkippedCheck("auth_posture", "skipped: config failed to load"),
+			)
+		} else {
+			doc.Checks = append(doc.Checks,
+				doctorCheck{
+					Name:    "config",
+					Status:  doctorStatusFail,
+					Summary: "config is invalid",
+					Details: []string{err.Error()},
+				},
+				doctorSkippedCheck("storage", "skipped: config validation failed"),
+				doctorSkippedCheck("route_wiring", "skipped: config validation failed"),
+				doctorSkippedCheck("auth_posture", "skipped: config validation failed"),
+			)
+		}
 		doc.OverallStatus = doctorOverallStatus(doc.Checks)
 		return doc
 	}

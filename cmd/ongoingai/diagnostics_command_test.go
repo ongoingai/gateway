@@ -166,6 +166,20 @@ func TestRunDiagnosticsRejectsUnknownTarget(t *testing.T) {
 	}
 }
 
+func TestRunDiagnosticsRejectsInvalidFormat(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDiagnostics([]string{"--format", "yaml"}, &stdout, &stderr)
+	if code != 2 {
+		t.Fatalf("runDiagnostics() code=%d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "expected text or json") {
+		t.Fatalf("stderr=%q, want invalid format message", stderr.String())
+	}
+}
+
 func TestRunDiagnosticsReturnsErrorOnNon200(t *testing.T) {
 	t.Parallel()
 

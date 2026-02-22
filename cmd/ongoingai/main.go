@@ -249,12 +249,8 @@ func runConfigValidate(args []string, out io.Writer, errOut io.Writer) int {
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	_, _, err := loadAndValidateConfig(*configPath)
 	if err != nil {
-		fmt.Fprintf(errOut, "config is invalid: %v\n", err)
-		return 1
-	}
-	if err := config.Validate(cfg); err != nil {
 		fmt.Fprintf(errOut, "config is invalid: %v\n", err)
 		return 1
 	}
@@ -316,13 +312,13 @@ func runServe(args []string) int {
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, stage, err := loadAndValidateConfig(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
-		return 1
-	}
-	if err := config.Validate(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "config is invalid: %v\n", err)
+		if stage == configStageLoad {
+			fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "config is invalid: %v\n", err)
+		}
 		return 1
 	}
 
