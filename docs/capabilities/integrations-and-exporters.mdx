@@ -20,6 +20,8 @@ It covers current export surfaces and practical pull-based integration patterns.
 - Emits structured JSON logs to stdout for request lifecycle and audit events.
 - Persists trace records to SQLite or Postgres for downstream reporting jobs.
 - Optionally exports gateway spans and metrics with native OpenTelemetry OTLP HTTP.
+- Exposes a native Prometheus `/metrics` scrape endpoint when
+  `prometheus_enabled: true`.
 - OpenTelemetry spans include gateway tenant identity attributes (`org_id`,
   `workspace_id`, `key_id`) when auth is enabled.
 - Supports browser-based integration clients with CORS headers on API routes.
@@ -69,6 +71,8 @@ observability:
     sampling_ratio: 1.0
     export_timeout_ms: 3000
     metric_export_interval_ms: 10000
+    # prometheus_enabled: false
+    # prometheus_path: /metrics
 ```
 
 With `capture_bodies=false`, your integrations still get usage, latency, and
@@ -165,13 +169,20 @@ You should see:
 - Cause: Collector parser is not configured for newline-delimited JSON.
 - Fix: Configure the collector source as JSON line input for gateway stdout.
 
-### Expected Prometheus or OpenTelemetry exporter endpoint is missing
+### Prometheus `/metrics` returns 404
 
-- Symptom: Requests to `/metrics` or OTLP exporter targets fail.
-- Cause: `/metrics` is not implemented as a native Prometheus scrape endpoint,
-  or OpenTelemetry export is disabled/misconfigured.
-- Fix: For Prometheus, use a collector bridge (OTLP -> Prometheus). For OTEL,
-  set `observability.otel.enabled=true` and verify
+- Symptom: Requests to `/metrics` return `404`.
+- Cause: `prometheus_enabled` is not set to `true`.
+- Fix: Set `observability.otel.prometheus_enabled: true` in YAML or
+  `ONGOINGAI_PROMETHEUS_ENABLED=true` as an env var. Verify that
+  `prometheus_path` matches the requested path.
+
+### OTLP exporter targets fail
+
+- Symptom: OTLP export errors in gateway logs.
+- Cause: OpenTelemetry export is disabled or the collector endpoint is
+  unreachable.
+- Fix: Set `observability.otel.enabled=true` and verify
   `observability.otel.endpoint` reachability.
 
 ## Next steps

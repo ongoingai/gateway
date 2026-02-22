@@ -136,7 +136,7 @@ Planned work:
 - [x] Add Prometheus-compatible metric export support.
 - [x] Enforce credential scrubbing on all span attributes and metric labels so API keys, tokens, and provider credentials never leak into telemetry data.
 - [x] Add tests for all new metrics, spans, and analytics paths, including regression tests for credential scrubbing in telemetry exports.
-- [ ] Update configuration reference, self-hosting guide, and troubleshooting docs to cover new observability features, Prometheus setup, and alerting recommendations.
+- [x] Update configuration reference, self-hosting guide, and troubleshooting docs to cover new observability features, Prometheus setup, and alerting recommendations.
 
 Exit criteria:
 

@@ -1,6 +1,6 @@
 ---
 title: OpenTelemetry
-description: Export distributed traces and gateway metrics to any OTLP-compatible collector over HTTP.
+description: Export distributed traces and gateway metrics to any OTLP-compatible collector over HTTP, or scrape with Prometheus.
 related:
   title: Next steps
   description: Continue with trace model details, pull-based integrations, and config reference.
@@ -11,30 +11,38 @@ related:
 ---
 
 Use this page to configure OpenTelemetry (OTEL) trace and metric export from
-OngoingAI Gateway to an OTLP-compatible collector.
+OngoingAI Gateway to an OTLP-compatible collector, or to expose a native
+Prometheus scrape endpoint.
 
 ## When to use this integration
 
 - You run an observability stack that accepts OTLP data, such as Jaeger,
   Grafana Tempo, Datadog, Honeycomb, or a standalone OpenTelemetry Collector.
 - You need distributed tracing across the gateway and upstream provider calls.
-- You need gateway-level operational metrics for queue health and write
-  reliability.
+- You need gateway-level operational metrics for queue health, provider
+  latency, and write reliability.
 - You want tenant-scoped span attributes for multi-tenant observability
   filtering.
+- You run Prometheus and want to scrape gateway metrics directly.
 
 ## How it works
 
-When enabled, the gateway creates two OTLP HTTP exporters at startup:
+When enabled, the gateway creates OTLP HTTP exporters at startup:
 
 1. A **trace exporter** that batches and sends spans to your collector.
-2. A **metric exporter** that periodically pushes counters and gauges.
+2. A **metric exporter** that periodically pushes counters, histograms, and
+   gauges.
+3. A **Prometheus scrape endpoint** (`/metrics` by default) that serves
+   metrics in Prometheus exposition format when `prometheus_enabled` is `true`.
+4. A **credential scrubbing exporter** that wraps the trace exporter and
+   sanitizes all span attribute values before they leave the process, providing
+   defense-in-depth against credential leaks in telemetry.
 
 The gateway wraps its HTTP server and upstream transport with OpenTelemetry
 instrumentation. Each inbound request produces a server span, and each upstream
-proxy call produces a client span as a child of the server span. After
-authentication completes, a span enrichment middleware adds tenant identity
-attributes to the active span.
+proxy call produces a client span as a child of the server span. Dedicated
+child spans cover auth evaluation, provider routing, trace enqueue, and
+storage writes.
 
 Trace context propagates using the
 [W3C Trace Context](https://www.w3.org/TR/trace-context/) standard.
@@ -54,6 +62,8 @@ observability:
     service_name: ongoingai-gateway
     traces_enabled: true
     metrics_enabled: true
+    prometheus_enabled: false
+    prometheus_path: /metrics
     sampling_ratio: 1.0
     export_timeout_ms: 3000
     metric_export_interval_ms: 10000
@@ -68,7 +78,9 @@ observability:
 | `observability.otel.insecure` | bool | `true` | Use plain HTTP. Set to `false` for HTTPS. |
 | `observability.otel.service_name` | string | `ongoingai-gateway` | Value for the `service.name` resource attribute. |
 | `observability.otel.traces_enabled` | bool | `true` | Enable trace span export. |
-| `observability.otel.metrics_enabled` | bool | `true` | Enable metric export. |
+| `observability.otel.metrics_enabled` | bool | `true` | Enable OTLP push metric export. |
+| `observability.otel.prometheus_enabled` | bool | `false` | Enable native Prometheus scrape endpoint. |
+| `observability.otel.prometheus_path` | string | `/metrics` | Path for the Prometheus scrape endpoint. Must start with `/` and must not overlap with `/api`, `/openai`, or `/anthropic`. |
 | `observability.otel.sampling_ratio` | float | `1.0` | Trace sampling ratio from `0.0` (none) to `1.0` (all). Uses parent-based sampling with trace ID ratio. |
 | `observability.otel.export_timeout_ms` | int | `3000` | Timeout in milliseconds for each export request to the collector. |
 | `observability.otel.metric_export_interval_ms` | int | `10000` | Interval in milliseconds between periodic metric exports. |
@@ -86,13 +98,19 @@ values.
 | `OTEL_EXPORTER_OTLP_INSECURE` | Set to `true` for plain HTTP transport. |
 | `OTEL_SERVICE_NAME` | Override `service_name`. |
 | `OTEL_TRACES_EXPORTER` | Set to `otlp` to enable traces, or `none` to disable. |
-| `OTEL_METRICS_EXPORTER` | Set to `otlp` to enable metrics, or `none` to disable. |
+| `OTEL_METRICS_EXPORTER` | Set to `otlp` to enable push metrics, `prometheus` to enable Prometheus scrape mode, or `none` to disable. |
 | `OTEL_TRACES_SAMPLER_ARG` | Sampling ratio as a float (for example, `0.5`). |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | Export timeout in milliseconds. |
 | `OTEL_METRIC_EXPORT_INTERVAL` | Metric export interval in milliseconds. |
+| `ONGOINGAI_PROMETHEUS_ENABLED` | Set to `true` to enable Prometheus scrape endpoint. |
+| `ONGOINGAI_PROMETHEUS_PATH` | Override the Prometheus endpoint path (default `/metrics`). |
 
 Setting `OTEL_EXPORTER_OTLP_ENDPOINT` to a non-empty value automatically
 enables OTEL export, even if `observability.otel.enabled` is `false` in YAML.
+
+Setting `OTEL_METRICS_EXPORTER=prometheus` enables Prometheus mode and
+disables OTLP push metrics. This is equivalent to setting
+`prometheus_enabled: true` and `metrics_enabled: false`.
 
 ### Endpoint format
 
@@ -131,13 +149,67 @@ span name is prefixed with `proxy`:
 | `/openai/...` | `proxy POST /openai/*` |
 | `/anthropic/...` | `proxy POST /anthropic/*` |
 
-### Gateway attributes
+### Auth evaluation spans
 
-After authentication completes, the gateway adds tenant identity attributes to
-the active span:
+The `gateway.auth` span wraps the auth middleware and records whether the
+request was allowed or denied.
 
 | Attribute | Description |
 | --- | --- |
+| `gateway.auth.result` | `allow` or `deny`. |
+| `gateway.auth.deny_reason` | `unauthorized` or `forbidden` (only set on deny). |
+
+On deny, the span status is set to `Error` with the deny reason.
+
+### Route spans
+
+The `gateway.route` span wraps provider routing and records the matched
+provider and route prefix.
+
+| Attribute | Description |
+| --- | --- |
+| `gateway.route.provider` | Matched provider: `openai`, `anthropic`, or `unknown`. |
+| `gateway.route.prefix` | Matched route prefix: `/openai`, `/anthropic`, or `/`. |
+| `gateway.org_id` | Organization ID from the authenticated gateway key. |
+| `gateway.workspace_id` | Workspace ID from the authenticated gateway key. |
+
+The span status is set to `Error` for HTTP 5xx responses.
+
+### Trace enqueue spans
+
+The `gateway.trace.enqueue` span records whether a trace was accepted into the
+async write queue or dropped due to backpressure.
+
+| Attribute | Description |
+| --- | --- |
+| `gateway.trace.enqueue.result` | `accepted` or `dropped`. |
+| `gateway.org_id` | Organization ID from the authenticated gateway key. |
+| `gateway.workspace_id` | Workspace ID from the authenticated gateway key. |
+
+On drop, the span status is set to `Error` with message `trace dropped`.
+
+### Trace write spans
+
+The `gateway.trace.write` span records each storage write batch from the async
+trace writer.
+
+| Attribute | Description |
+| --- | --- |
+| `gateway.trace.write.batch_size` | Number of traces in the write batch. |
+| `gateway.trace.write.error_class` | Error classification on failure (credential-scrubbed). |
+
+On write failure, the span status is set to `Error` with message
+`write failed`. The `error_class` value is sanitized by the credential
+scrubbing layer to prevent credential leakage in error messages.
+
+### Gateway attributes
+
+After authentication completes, the span enrichment middleware adds tenant
+identity attributes to the active server span:
+
+| Attribute | Description |
+| --- | --- |
+| `gateway.correlation_id` | Correlation ID linking logs, spans, and traces. |
 | `gateway.org_id` | Organization ID from the authenticated gateway key. |
 | `gateway.workspace_id` | Workspace ID from the authenticated gateway key. |
 | `gateway.key_id` | Gateway API key identifier. |
@@ -163,30 +235,303 @@ All spans and metrics include the following resource attributes:
 
 ## Metrics
 
-The gateway exports two custom counters:
+The gateway exports 12 metric instruments organized in three groups.
 
-### `ongoingai.trace.queue_dropped_total`
+### Trace pipeline metrics
+
+#### `ongoingai.trace.queue_dropped_total`
+
+**Type:** Int64Counter
 
 Counts trace records dropped because the async trace queue was full.
 
 | Attribute | Description |
 | --- | --- |
-| `route` | Route pattern such as `/openai/*` or `/api/*`. |
+| `provider` | Provider name (`openai`, `anthropic`). |
+| `org_id` | Organization ID. |
+| `workspace_id` | Workspace ID. |
+| `route` | Route pattern (`/openai/*`, `/anthropic/*`, `/api/*`, `/other`). |
 | `status_code` | HTTP response status code. |
 
-### `ongoingai.trace.write_failed_total`
+#### `ongoingai.trace.write_failed_total`
+
+**Type:** Int64Counter
 
 Counts trace records dropped after a storage write failure.
 
 | Attribute | Description |
 | --- | --- |
-| `operation` | Write operation that failed, such as `write_trace` or `write_batch_fallback`. |
-| `error_class` | Classified failure type: `connection`, `timeout`, `contention`, `constraint`, or `unknown`. |
-| `store` | Trace storage backend, such as `sqlite` or `postgres`. |
+| `operation` | Write operation that failed (`write_trace`, `write_batch_fallback`). |
+| `error_class` | Classified failure: `connection`, `timeout`, `contention`, `constraint`, or `unknown`. |
+| `store` | Trace storage backend (`sqlite`, `postgres`). |
 
-Both counters help you detect trace pipeline backpressure and storage issues
-before they affect audit completeness. A sustained increase in either counter
-indicates that trace data is being lost.
+#### `ongoingai.trace.enqueued_total`
+
+**Type:** Int64Counter
+
+Counts traces successfully enqueued to the async write queue. No attributes.
+
+#### `ongoingai.trace.written_total`
+
+**Type:** Int64Counter
+
+Counts traces successfully persisted to storage. No attributes.
+
+#### `ongoingai.trace.flush_duration_seconds`
+
+**Type:** Float64Histogram
+**Unit:** seconds
+
+Time to flush a batch of traces to storage. No attributes.
+
+#### `ongoingai.trace.flush_batch_size`
+
+**Type:** Int64Histogram
+
+Number of traces per flush batch. No attributes.
+
+#### `ongoingai.trace.queue_depth`
+
+**Type:** Int64ObservableGauge
+
+Current number of traces waiting in the async write queue. Sampled each
+collection cycle. No attributes.
+
+#### `ongoingai.trace.queue_capacity`
+
+**Type:** Int64ObservableGauge
+
+Capacity of the async trace write queue. Sampled each collection cycle. No
+attributes.
+
+### Provider metrics
+
+#### `ongoingai.provider.request_total`
+
+**Type:** Int64Counter
+
+Counts upstream provider requests.
+
+| Attribute | Description |
+| --- | --- |
+| `provider` | Provider name (`openai`, `anthropic`). |
+| `model` | Model name from the request. |
+| `status_code` | HTTP response status code from the provider. |
+
+#### `ongoingai.provider.request_duration_seconds`
+
+**Type:** Float64Histogram
+**Unit:** seconds
+
+Upstream provider request duration.
+
+| Attribute | Description |
+| --- | --- |
+| `provider` | Provider name (`openai`, `anthropic`). |
+| `model` | Model name from the request. |
+
+### Proxy metrics
+
+#### `ongoingai.proxy.request_total`
+
+**Type:** Int64Counter
+
+Counts proxy requests with tenant scoping.
+
+| Attribute | Description |
+| --- | --- |
+| `provider` | Provider name (`openai`, `anthropic`). |
+| `org_id` | Organization ID. |
+| `workspace_id` | Workspace ID. |
+| `route` | Route pattern (`/openai/*`, `/anthropic/*`, `/api/*`, `/other`). |
+| `status_code` | HTTP response status code. |
+
+#### `ongoingai.proxy.request_duration_seconds`
+
+**Type:** Float64Histogram
+**Unit:** seconds
+
+Proxy request duration with tenant scoping.
+
+| Attribute | Description |
+| --- | --- |
+| `provider` | Provider name (`openai`, `anthropic`). |
+| `org_id` | Organization ID. |
+| `workspace_id` | Workspace ID. |
+| `route` | Route pattern (`/openai/*`, `/anthropic/*`, `/api/*`, `/other`). |
+
+## Prometheus
+
+The gateway can expose a native Prometheus scrape endpoint that serves all
+12 metric instruments in Prometheus exposition format. This is an alternative
+to OTLP push metrics for teams that run Prometheus-based monitoring.
+
+### Configuration
+
+Enable Prometheus in YAML:
+
+```yaml filename="ongoingai.yaml"
+observability:
+  otel:
+    enabled: true
+    service_name: ongoingai-gateway
+    traces_enabled: false
+    metrics_enabled: false
+    prometheus_enabled: true
+    prometheus_path: /metrics
+```
+
+Or with environment variables:
+
+```bash filename="Terminal"
+ONGOINGAI_PROMETHEUS_ENABLED=true \
+ONGOINGAI_PROMETHEUS_PATH=/metrics \
+ongoingai serve --config ongoingai.yaml
+```
+
+Setting `OTEL_METRICS_EXPORTER=prometheus` also enables Prometheus mode and
+disables OTLP push metrics.
+
+### Verify the endpoint
+
+After starting the gateway with Prometheus enabled:
+
+```bash filename="Terminal"
+curl http://localhost:8080/metrics
+```
+
+You should see Prometheus exposition format output with `ongoingai_` prefixed
+metric names.
+
+### Grafana / Prometheus scrape config
+
+Add the gateway as a scrape target in your Prometheus configuration:
+
+```yaml filename="prometheus.yml"
+scrape_configs:
+  - job_name: ongoingai-gateway
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["localhost:8080"]
+    metrics_path: /metrics
+```
+
+### Using both Prometheus and OTLP push
+
+You can enable both Prometheus scrape and OTLP push metrics simultaneously:
+
+```yaml filename="ongoingai.yaml"
+observability:
+  otel:
+    enabled: true
+    endpoint: localhost:4318
+    insecure: true
+    service_name: ongoingai-gateway
+    traces_enabled: true
+    metrics_enabled: true
+    prometheus_enabled: true
+```
+
+Both exporters read from the same meter provider, so metric values are
+consistent across both surfaces.
+
+## Credential scrubbing
+
+The gateway applies defense-in-depth credential scrubbing to all telemetry
+exports.
+
+### How it works
+
+A scrubbing exporter wraps the OTLP trace exporter and sanitizes all string
+attribute values before they leave the process. The scrubbing runs in the
+async batch export goroutine, not on the request hot path.
+
+The `MakeWriteSpanHook` also sanitizes error messages recorded in
+`gateway.trace.write` spans via `ScrubCredentials`.
+
+### Patterns detected
+
+| Pattern | Examples |
+| --- | --- |
+| Token prefixes | `sk_...`, `pk_...`, `rk_...`, `xoxb_...`, `ghp_...`, `pat_...` |
+| JWTs | `eyJ...` (three dot-separated base64url segments) |
+| Bearer tokens | `Bearer <token>` in header-like strings |
+| Connection string secrets | `password=...`, `secret=...`, `token=...` |
+
+All detected patterns are replaced with `[CREDENTIAL_REDACTED]`.
+
+### Safety guarantees
+
+- Metric labels are gateway-controlled string constants (provider names,
+  route patterns, error classifications) and do not contain user-supplied
+  credential material.
+- Span attributes that could carry credential data (error messages, status
+  descriptions) are scrubbed before export.
+- Clean spans with no credential patterns pass through with zero allocation
+  overhead.
+
+## Alerting recommendations
+
+These PromQL examples target common gateway failure modes. Adjust thresholds
+for your traffic volume and SLO targets.
+
+### Trace queue drops
+
+Alert when traces are being dropped due to queue backpressure:
+
+```promql
+increase(ongoingai_trace_queue_dropped_total[5m]) > 0
+```
+
+Any nonzero value indicates trace data loss. Investigate storage throughput
+and connectivity.
+
+### Trace write failures
+
+Alert when storage writes are failing:
+
+```promql
+increase(ongoingai_trace_write_failed_total[5m]) > 0
+```
+
+Check `error_class` label for failure classification (`connection`, `timeout`,
+`contention`, `constraint`).
+
+### Queue saturation
+
+Alert when the trace queue is near capacity:
+
+```promql
+ongoingai_trace_queue_depth / ongoingai_trace_queue_capacity > 0.9
+```
+
+Sustained high saturation precedes queue drops. Scale storage throughput or
+reduce capture load.
+
+### Provider error rate
+
+Alert on elevated provider error rates:
+
+```promql
+sum(rate(ongoingai_provider_request_total{status_code=~"5.."}[5m]))
+  /
+sum(rate(ongoingai_provider_request_total[5m])) > 0.05
+```
+
+A 5% error rate threshold is a reasonable starting point. Break down by
+`provider` and `model` labels to isolate the source.
+
+### High proxy latency
+
+Alert on elevated proxy latency:
+
+```promql
+histogram_quantile(0.99,
+  rate(ongoingai_proxy_request_duration_seconds_bucket[5m])
+) > 10
+```
+
+Adjust the quantile and threshold to match your latency SLO.
 
 ## Shutdown behavior
 
@@ -257,6 +602,21 @@ ratio of `0.1` samples 10% of requests. Parent-based sampling ensures that if
 an incoming request already carries a sampled trace context, the gateway
 respects that decision regardless of the local ratio.
 
+### Prometheus-only mode
+
+Export metrics via Prometheus without an OTLP collector:
+
+```yaml filename="ongoingai.yaml"
+observability:
+  otel:
+    enabled: true
+    service_name: ongoingai-gateway
+    traces_enabled: false
+    metrics_enabled: false
+    prometheus_enabled: true
+    prometheus_path: /metrics
+```
+
 ### Environment variable quickstart
 
 Enable OTEL export without modifying YAML:
@@ -264,6 +624,13 @@ Enable OTEL export without modifying YAML:
 ```bash filename="Terminal"
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
 OTEL_SERVICE_NAME=ongoingai-gateway \
+ongoingai serve --config ongoingai.yaml
+```
+
+Enable Prometheus scrape via env vars:
+
+```bash filename="Terminal"
+OTEL_METRICS_EXPORTER=prometheus \
 ongoingai serve --config ongoingai.yaml
 ```
 
@@ -299,7 +666,8 @@ ongoingai serve --config ongoingai.yaml
    `ongoingai-gateway`.
 
 You should see at least two spans: one for the inbound request and one for the
-upstream proxy call.
+upstream proxy call. With auth enabled, you will also see `gateway.auth` and
+`gateway.route` child spans.
 
 ## Troubleshooting
 
@@ -341,7 +709,25 @@ upstream proxy call.
 - Cause: `metrics_enabled` is `false`, or the collector does not accept OTLP
   metrics on the configured endpoint.
 - Fix: Set `metrics_enabled` to `true` and verify that the collector supports
-  OTLP metric ingestion on the same endpoint.
+  OTLP metric ingestion on the same endpoint. Alternatively, enable
+  `prometheus_enabled` to scrape metrics directly.
+
+### Prometheus `/metrics` returns 404
+
+- Symptom: `curl http://localhost:8080/metrics` returns `404`.
+- Cause: `prometheus_enabled` is not set to `true`, or `prometheus_path` does
+  not match the request path.
+- Fix: Set `observability.otel.prometheus_enabled: true` in YAML or
+  `ONGOINGAI_PROMETHEUS_ENABLED=true` as an env var. Verify that
+  `prometheus_path` matches the path you are requesting.
+
+### Credential patterns appear in spans
+
+- Symptom: Span attributes contain API keys or tokens.
+- Cause: This should not happen when the scrubbing exporter is active.
+  The scrubbing exporter is automatically enabled when traces are enabled.
+- Fix: Verify that `traces_enabled: true` is set. If you see credential
+  material in spans despite this, file a bug report.
 
 ### Config validation fails with OTEL settings
 
@@ -349,7 +735,9 @@ upstream proxy call.
 - Cause: A required field is empty or a numeric value is out of range.
 - Fix: Verify that `endpoint` and `service_name` are non-empty, that
   `sampling_ratio` is between `0.0` and `1.0`, and that timeout values are
-  positive integers.
+  positive integers. When `prometheus_enabled` is `true`, verify that
+  `prometheus_path` starts with `/` and does not overlap with `/api`,
+  `/openai`, or `/anthropic`.
 
 ## Next steps
 
