@@ -1,17 +1,19 @@
 ---
 title: CLI reference
-description: Use ongoingai commands to start the gateway, validate config, set SDK base URLs, wrap client commands, generate offline reports, and debug trace chains.
+description: Use ongoingai commands to start the gateway, validate config, run doctor checks, query live diagnostics, set SDK base URLs, wrap client commands, generate offline reports, and debug trace chains.
 related:
   title: Next steps
   description: Continue with config details, env overrides, and API contracts.
   links:
     - gateway/reference/config-reference
+    - gateway/reference/cli-json-contracts
     - gateway/reference/env-var-reference
     - gateway/reference/rest-api-reference
 ---
 
 Use this page to run OngoingAI Gateway from the command line.
 It documents command syntax, flags, output behavior, and exit codes.
+For stable scripting schemas for JSON output, see [CLI JSON contracts](/gateway/reference/cli-json-contracts).
 
 ## Quick command map
 
@@ -25,6 +27,8 @@ ongoingai shell-init [--config PATH]
 ongoingai wrap [--config PATH] -- <command> [args...]
 ongoingai report [--config PATH] [--format text|json] [--from RFC3339|YYYY-MM-DD] [--to RFC3339|YYYY-MM-DD] [--provider NAME] [--model NAME] [--limit N]
 ongoingai debug [last] [--config PATH] [--trace-id ID] [--trace-group-id ID] [--thread-id ID] [--run-id ID] [--format text|json] [--limit N] [--diff] [--bundle-out PATH] [--include-headers] [--include-bodies]
+ongoingai doctor [--config PATH] [--format text|json]
+ongoingai diagnostics [trace-pipeline] [--config PATH] [--base-url URL] [--gateway-key TOKEN] [--auth-header HEADER] [--format text|json] [--timeout DURATION]
 ```
 
 By default, commands read config from `ongoingai.yaml`.
@@ -44,6 +48,8 @@ deployment gates before restart.
 | `wrap` | Run another command with gateway base URLs injected into env. |
 | `report` | Read trace storage directly and print analytics + recent trace report. |
 | `debug` | Inspect the latest trace (or a specific trace) and print its full lineage chain. |
+| `doctor` | Run local diagnostics for config validity, storage connectivity, route wiring, and auth posture. |
+| `diagnostics` | Query live queue-pressure and dropped-trace diagnostics from a running gateway API. |
 
 ## Command reference
 
@@ -233,6 +239,9 @@ Behavior:
 - Connects directly to SQLite or Postgres trace storage.
 - Queries usage, cost, models, key stats, provider breakdown, and recent traces.
 - Prints a report without requiring the HTTP server.
+- JSON output includes stable `schema_version: "report.v1"` for scripting contracts and echoes selected filters (including `limit`).
+- Optional time filters are cleaner: `filters.from` and `filters.to` are omitted unless explicitly set via `--from` / `--to`.
+- JSON arrays are deterministic: providers sorted by token volume, models by request count then model name, API keys by request count then hash, and recent traces by timestamp/id.
 
 Exit codes:
 - `0`: Report generated successfully.
@@ -281,6 +290,7 @@ Behavior:
 - Prints ordered chain checkpoints with lineage metadata, tokens, latency, and costs.
 - When `--diff` is enabled, prints redaction-safe deltas (field changes, token/latency deltas, metadata key changes) without exposing raw secret values.
 - When `--bundle-out` is set, exports a support/debug artifact bundle (`debug-chain.json` + `manifest.json`) with file checksums.
+- JSON output includes stable `schema_version: "debug-chain.v1"`, explicit `selection` + `options` blocks, and deterministic checkpoint ordering.
 
 Exit codes:
 - `0`: Debug chain generated successfully.
@@ -297,6 +307,85 @@ ongoingai debug --thread-id thread_abc123 --run-id run_abc123
 ongoingai debug --trace-group-id group_abc123 --diff
 ongoingai debug --trace-group-id group_abc123 --diff --bundle-out ./artifacts/debug-bundle
 ongoingai debug --include-headers --include-bodies
+```
+
+### `ongoingai doctor`
+
+Run local gateway diagnostics in one pass.
+This command validates config, tests trace storage connectivity, checks route wiring, and checks auth posture.
+
+Syntax:
+
+```bash filename="Terminal"
+ongoingai doctor [--config PATH] [--format text|json]
+```
+
+Flags:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--config` | string | `ongoingai.yaml` | Path to config file. |
+| `--format` | string | `text` | Output format: `text` or `json`. |
+
+Behavior:
+- Loads and validates config.
+- Connects to configured trace storage and runs a read query.
+- Validates provider route prefixes and verifies proxy wiring can be built.
+- Reports auth posture including header safety and key availability when auth is enabled.
+- Emits deterministic check names: `config`, `storage`, `route_wiring`, and `auth_posture`.
+
+Exit codes:
+- `0`: Diagnostics completed with `pass` or `warn` overall status.
+- `1`: One or more checks failed (`overall_status=fail`) or output write failure.
+- `2`: Usage or argument parse error.
+
+Examples:
+
+```bash filename="Terminal"
+ongoingai doctor
+ongoingai doctor --format json
+ongoingai doctor --config ./ongoingai.yaml --format text
+```
+
+### `ongoingai diagnostics`
+
+Read live trace-pipeline queue pressure and dropped-trace diagnostics from a
+running gateway API endpoint.
+
+Syntax:
+
+```bash filename="Terminal"
+ongoingai diagnostics [trace-pipeline] [--config PATH] [--base-url URL] [--gateway-key TOKEN] [--auth-header HEADER] [--format text|json] [--timeout DURATION]
+```
+
+Flags:
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--config` | string | `ongoingai.yaml` | Path to config file used for default base URL and auth header resolution. |
+| `--base-url` | string | derived from config (`http://<host>:<port>`) | Gateway API base URL override. |
+| `--gateway-key` | string | empty | Gateway key token for protected diagnostics routes when auth is enabled. |
+| `--auth-header` | string | config `auth.header` or `X-OngoingAI-Gateway-Key` | Gateway key header name used with `--gateway-key`. |
+| `--format` | string | `text` | Output format: `text` or `json`. |
+| `--timeout` | duration | `5s` | HTTP timeout for the diagnostics request. |
+
+Behavior:
+- Target defaults to `trace-pipeline`; this can be passed positionally for explicit scripting.
+- Requests `GET /api/diagnostics/trace-pipeline`.
+- JSON output preserves the stable diagnostics contract (`trace-pipeline-diagnostics.v1`).
+- Text output summarizes queue pressure, queue depth/high watermark, and dropped-trace counters.
+
+Exit codes:
+- `0`: Diagnostics fetched successfully.
+- `1`: Config resolution, HTTP request, or response parsing error.
+- `2`: Usage or argument parse error.
+
+Examples:
+
+```bash filename="Terminal"
+ongoingai diagnostics
+ongoingai diagnostics --format json
+ongoingai diagnostics trace-pipeline --base-url http://localhost:8080 --gateway-key GATEWAY_KEY
 ```
 
 ## Process-level behavior

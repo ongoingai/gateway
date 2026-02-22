@@ -186,12 +186,23 @@ Run the following checks in order before you debug individual endpoints.
 - Cause: Async trace queue is saturated while storage writes lag.
 - Fix: Reduce capture load, improve storage throughput, and monitor warning
   frequency.
+- Inspect live queue pressure and drop counters:
+
+  ```bash filename="Terminal"
+  ongoingai diagnostics --format json
+  ```
 
 ### Logs show `trace persistence failed; dropped trace records`
 
 - Symptom: Error logs report failed trace write batches.
 - Cause: Trace store write failures in async writer.
 - Fix: Verify storage health and connectivity, then confirm errors stop.
+- Use diagnostics API for explicit dropped-trace counters:
+
+  ```bash filename="Terminal"
+  curl "http://localhost:8080/api/diagnostics/trace-pipeline" \
+    -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
+  ```
 
 ### Logs show `failed to flush pending traces before shutdown`
 

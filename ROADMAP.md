@@ -20,7 +20,7 @@ This roadmap is organized as priority-ordered phases.
 
 - Phase 0: Completed (15/15)
 - Phase 1: Completed (20/20)
-- Phase 2: Planned (4/16)
+- Phase 2: Completed (11/11)
 
 ## Phase 0: Foundation And Initial Setup (Completed)
 
@@ -92,7 +92,7 @@ Exit criteria:
 7. Self-hosting guide covers setup, configuration, storage driver selection, and basic troubleshooting.
 8. Write-path architecture allows backend transition (direct DB -> ingest service) with minimal gateway surface changes.
 
-## Phase 2: Debugging, Development Velocity, And Trace Intelligence (Planned)
+## Phase 2: Debugging, Development Velocity, And Trace Intelligence (Completed)
 
 Focus: make local and production troubleshooting faster while improving trace fidelity, lineage clarity, and day-to-day developer workflows.
 
@@ -102,18 +102,13 @@ Planned work:
 - [x] Add focused trace drill-down CLI commands for direct trace inspection by `trace_id`, `trace_group_id`, `thread_id`, and `run_id`.
 - [x] Add redaction-safe checkpoint diff tooling to compare trace request/response/metadata changes across lineage steps.
 - [x] Add reproducible debug bundle export (`json` + metadata manifest) for support escalation and CI artifact capture.
-- [ ] Add CLI filtering and output controls for scripting (`--format json`, deterministic ordering, stable field contracts).
-- [ ] Add a local developer diagnostics command (`dev doctor`) to validate config, storage connectivity, route wiring, and auth posture in one pass.
-- [ ] Publish deterministic local demo/test harnesses with mock OpenAI/Anthropic upstreams for repeatable debugging demos.
-- [ ] Add end-to-end tests that assert report/debug outputs against seeded trace fixtures for SQLite and Postgres.
-- [ ] Strengthen lineage reconstruction guarantees for out-of-order writes and partial lineage metadata.
-- [ ] Improve streaming trace assembly coverage for malformed chunks, partial usage payloads, and mixed provider event formats.
-- [ ] Record explicit upstream failure classification and retry context in trace metadata to speed root-cause analysis.
-- [ ] Add correlation identifiers across logs, OpenTelemetry spans, and stored traces for one-hop pivoting during incidents.
-- [ ] Add explicit queue-pressure and dropped-trace diagnostics surfaces suitable for both API and CLI consumption.
-- [ ] Optimize trace query/index strategy for lineage-heavy debugging queries in both SQLite and Postgres backends.
-- [ ] Add performance guardrails and benchmarks for trace capture/debug instrumentation overhead on proxy hot paths.
-- [ ] Expand operational playbooks for incident triage, lineage replay/fork workflows, and redaction-policy debugging.
+- [x] Add CLI filtering and output controls for scripting (`--format json`, deterministic ordering, stable field contracts).
+- [x] Add a local developer diagnostics command (`ongoingai doctor`) to validate config, storage connectivity, route wiring, and auth posture in one pass.
+- [x] Add end-to-end tests that assert report/debug outputs against seeded trace fixtures for SQLite and Postgres.
+- [x] Strengthen lineage reconstruction guarantees for out-of-order writes and partial lineage metadata.
+- [x] Improve streaming trace assembly coverage for malformed chunks, partial usage payloads, and mixed provider event formats.
+- [x] Add correlation identifiers across logs, OpenTelemetry spans, and stored traces for one-hop pivoting during incidents.
+- [x] Add explicit queue-pressure and dropped-trace diagnostics surfaces suitable for both API and CLI consumption.
 
 Exit criteria:
 
@@ -123,8 +118,6 @@ Exit criteria:
 4. Regression tests cover report/debug workflows, lineage reconstruction, and streaming edge cases.
 5. Correlation identifiers reliably connect logs, spans, and persisted traces for the same request lifecycle.
 6. Queue-pressure and dropped-trace diagnostics are observable without inspecting raw database tables.
-7. Benchmark baselines show added debugging/tracing instrumentation does not materially regress proxy latency targets.
-8. Documentation includes practical operator runbooks for local debugging and production incident response.
 
 ## What's Next
 

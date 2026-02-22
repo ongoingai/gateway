@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -815,24 +814,7 @@ func queryReplayItems(ctx context.Context, store trace.TraceStore, filter trace.
 }
 
 func sortReplayItems(items []*trace.Trace) {
-	sort.SliceStable(items, func(i, j int) bool {
-		left := traceOrderTime(items[i])
-		right := traceOrderTime(items[j])
-		if left.Equal(right) {
-			return strings.TrimSpace(items[i].ID) < strings.TrimSpace(items[j].ID)
-		}
-		return left.Before(right)
-	})
-}
-
-func traceOrderTime(item *trace.Trace) time.Time {
-	if item == nil {
-		return time.Time{}
-	}
-	if !item.CreatedAt.IsZero() {
-		return item.CreatedAt.UTC()
-	}
-	return item.Timestamp.UTC()
+	trace.SortLineageTraces(items)
 }
 
 func indexTraceID(items []*trace.Trace, traceID string) int {

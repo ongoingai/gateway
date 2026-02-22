@@ -20,17 +20,19 @@ const (
 	defaultReportFormat = "text"
 	defaultReportLimit  = 10
 	maxReportLimit      = 200
+	reportSchemaVersion = "report.v1"
 )
 
 type reportDocument struct {
-	GeneratedAt time.Time            `json:"generated_at"`
-	Storage     reportStorageInfo    `json:"storage"`
-	Filters     reportFilterInfo     `json:"filters"`
-	Summary     reportSummaryInfo    `json:"summary"`
-	Providers   []reportProviderInfo `json:"providers"`
-	Models      []reportModelInfo    `json:"models"`
-	APIKeys     []reportKeyInfo      `json:"api_keys"`
-	Recent      []reportTraceInfo    `json:"recent_traces"`
+	SchemaVersion string               `json:"schema_version"`
+	GeneratedAt   time.Time            `json:"generated_at"`
+	Storage       reportStorageInfo    `json:"storage"`
+	Filters       reportFilterInfo     `json:"filters"`
+	Summary       reportSummaryInfo    `json:"summary"`
+	Providers     []reportProviderInfo `json:"providers"`
+	Models        []reportModelInfo    `json:"models"`
+	APIKeys       []reportKeyInfo      `json:"api_keys"`
+	Recent        []reportTraceInfo    `json:"recent_traces"`
 }
 
 type reportStorageInfo struct {
@@ -39,10 +41,11 @@ type reportStorageInfo struct {
 }
 
 type reportFilterInfo struct {
-	Provider string    `json:"provider,omitempty"`
-	Model    string    `json:"model,omitempty"`
-	From     time.Time `json:"from,omitempty"`
-	To       time.Time `json:"to,omitempty"`
+	Provider string     `json:"provider,omitempty"`
+	Model    string     `json:"model,omitempty"`
+	From     *time.Time `json:"from,omitempty"`
+	To       *time.Time `json:"to,omitempty"`
+	Limit    int        `json:"limit"`
 }
 
 type reportSummaryInfo struct {
@@ -112,12 +115,9 @@ func runReport(args []string, out io.Writer, errOut io.Writer) int {
 		return 2
 	}
 
-	normalizedFormat := strings.ToLower(strings.TrimSpace(*format))
-	if normalizedFormat == "" {
-		normalizedFormat = defaultReportFormat
-	}
-	if normalizedFormat != "text" && normalizedFormat != "json" {
-		fmt.Fprintf(errOut, "invalid report format %q: expected text or json\n", *format)
+	normalizedFormat, err := normalizeTextJSONFormat("report", *format, defaultReportFormat)
+	if err != nil {
+		fmt.Fprintln(errOut, err.Error())
 		return 2
 	}
 	if *limit <= 0 || *limit > maxReportLimit {
@@ -140,28 +140,22 @@ func runReport(args []string, out io.Writer, errOut io.Writer) int {
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, stage, err := loadAndValidateConfig(*configPath)
 	if err != nil {
-		fmt.Fprintf(errOut, "failed to load config: %v\n", err)
-		return 1
-	}
-	if err := config.Validate(cfg); err != nil {
-		fmt.Fprintf(errOut, "config is invalid: %v\n", err)
+		if stage == configStageLoad {
+			fmt.Fprintf(errOut, "failed to load config: %v\n", err)
+		} else {
+			fmt.Fprintf(errOut, "config is invalid: %v\n", err)
+		}
 		return 1
 	}
 
-	store, err := openReportTraceStore(cfg)
+	store, err := openTraceStore(cfg)
 	if err != nil {
 		fmt.Fprintf(errOut, "failed to initialize trace store: %v\n", err)
 		return 1
 	}
-	if closer, ok := store.(interface{ Close() error }); ok {
-		defer func() {
-			if err := closer.Close(); err != nil {
-				fmt.Fprintf(errOut, "warning: failed to close trace store: %v\n", err)
-			}
-		}()
-	}
+	defer closeTraceStoreWithWarning(store, errOut)
 
 	analyticsFilter := trace.AnalyticsFilter{
 		Provider: strings.TrimSpace(*provider),
@@ -189,17 +183,6 @@ func runReport(args []string, out io.Writer, errOut io.Writer) int {
 	}
 
 	return 0
-}
-
-func openReportTraceStore(cfg config.Config) (trace.TraceStore, error) {
-	switch strings.TrimSpace(cfg.Storage.Driver) {
-	case "sqlite":
-		return trace.NewSQLiteStore(cfg.Storage.Path)
-	case "postgres":
-		return trace.NewPostgresStore(cfg.Storage.DSN)
-	default:
-		return nil, fmt.Errorf("unsupported storage.driver %q", cfg.Storage.Driver)
-	}
 }
 
 func parseReportTime(raw string, endOfDay bool) (time.Time, error) {
@@ -325,7 +308,7 @@ func buildReport(
 	modelRows := make([]reportModelInfo, 0, len(models))
 	for _, model := range models {
 		totalRequests += model.RequestCount
-		if model.RequestCount > topModelRequests {
+		if model.RequestCount > topModelRequests || (model.RequestCount == topModelRequests && strings.TrimSpace(model.Model) < strings.TrimSpace(topModel)) {
 			topModelRequests = model.RequestCount
 			topModel = model.Model
 		}
@@ -372,18 +355,28 @@ func buildReport(
 			RequestPath:    item.RequestPath,
 		})
 	}
+	sortReportModelRows(modelRows)
+	sortReportKeyRows(keyRows)
+	sortReportRecentRows(recentRows)
+
+	storagePath := ""
+	if strings.TrimSpace(cfg.Storage.Driver) == "sqlite" {
+		storagePath = cfg.Storage.Path
+	}
 
 	return reportDocument{
-		GeneratedAt: time.Now().UTC(),
+		SchemaVersion: reportSchemaVersion,
+		GeneratedAt:   time.Now().UTC(),
 		Storage: reportStorageInfo{
 			Driver: cfg.Storage.Driver,
-			Path:   cfg.Storage.Path,
+			Path:   storagePath,
 		},
 		Filters: reportFilterInfo{
 			Provider: analyticsFilter.Provider,
 			Model:    analyticsFilter.Model,
-			From:     analyticsFilter.From,
-			To:       analyticsFilter.To,
+			From:     reportOptionalTime(analyticsFilter.From),
+			To:       reportOptionalTime(analyticsFilter.To),
+			Limit:    traceFilter.Limit,
 		},
 		Summary: reportSummaryInfo{
 			TotalRequests:     totalRequests,
@@ -432,12 +425,51 @@ func aggregateProviderRows(usageSeries []trace.UsagePoint, costSeries []trace.Co
 		rows = append(rows, *item)
 	}
 	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].TotalTokens == rows[j].TotalTokens {
-			return rows[i].Provider < rows[j].Provider
+		if rows[i].TotalTokens != rows[j].TotalTokens {
+			return rows[i].TotalTokens > rows[j].TotalTokens
 		}
-		return rows[i].TotalTokens > rows[j].TotalTokens
+		if rows[i].TotalCostUSD != rows[j].TotalCostUSD {
+			return rows[i].TotalCostUSD > rows[j].TotalCostUSD
+		}
+		return strings.TrimSpace(rows[i].Provider) < strings.TrimSpace(rows[j].Provider)
 	})
 	return rows
+}
+
+func sortReportModelRows(rows []reportModelInfo) {
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].RequestCount != rows[j].RequestCount {
+			return rows[i].RequestCount > rows[j].RequestCount
+		}
+		return strings.TrimSpace(rows[i].Model) < strings.TrimSpace(rows[j].Model)
+	})
+}
+
+func sortReportKeyRows(rows []reportKeyInfo) {
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].RequestCount != rows[j].RequestCount {
+			return rows[i].RequestCount > rows[j].RequestCount
+		}
+		return strings.TrimSpace(rows[i].APIKeyHash) < strings.TrimSpace(rows[j].APIKeyHash)
+	})
+}
+
+func sortReportRecentRows(rows []reportTraceInfo) {
+	sort.Slice(rows, func(i, j int) bool {
+		left := reportRecentTime(rows[i])
+		right := reportRecentTime(rows[j])
+		if !left.Equal(right) {
+			return left.After(right)
+		}
+		return strings.TrimSpace(rows[i].ID) > strings.TrimSpace(rows[j].ID)
+	})
+}
+
+func reportRecentTime(row reportTraceInfo) time.Time {
+	if row.Timestamp.IsZero() {
+		return time.Time{}
+	}
+	return row.Timestamp.UTC()
 }
 
 func writeReport(out io.Writer, format string, report reportDocument) error {
@@ -459,15 +491,17 @@ func writeReportText(out io.Writer, report reportDocument) error {
 	fmt.Fprintln(out, "OngoingAI Report")
 
 	metadataWriter := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(metadataWriter, "Schema version\t%s\n", report.SchemaVersion)
 	fmt.Fprintf(metadataWriter, "Generated at\t%s\n", report.GeneratedAt.Format(time.RFC3339))
 	fmt.Fprintf(metadataWriter, "Storage driver\t%s\n", report.Storage.Driver)
 	if strings.TrimSpace(report.Storage.Path) != "" {
 		fmt.Fprintf(metadataWriter, "Storage path\t%s\n", report.Storage.Path)
 	}
-	fmt.Fprintf(metadataWriter, "Filter provider\t%s\n", reportValueOr(report.Filters.Provider, "(all)"))
-	fmt.Fprintf(metadataWriter, "Filter model\t%s\n", reportValueOr(report.Filters.Model, "(all)"))
-	fmt.Fprintf(metadataWriter, "Filter from\t%s\n", reportTimeOr(report.Filters.From, "(all)"))
-	fmt.Fprintf(metadataWriter, "Filter to\t%s\n", reportTimeOr(report.Filters.To, "(all)"))
+	fmt.Fprintf(metadataWriter, "Filter provider\t%s\n", valueOr(report.Filters.Provider, "(all)"))
+	fmt.Fprintf(metadataWriter, "Filter model\t%s\n", valueOr(report.Filters.Model, "(all)"))
+	fmt.Fprintf(metadataWriter, "Filter from\t%s\n", timePtrOr(report.Filters.From, "(all)"))
+	fmt.Fprintf(metadataWriter, "Filter to\t%s\n", timePtrOr(report.Filters.To, "(all)"))
+	fmt.Fprintf(metadataWriter, "Filter limit\t%d\n", report.Filters.Limit)
 	if err := metadataWriter.Flush(); err != nil {
 		return err
 	}
@@ -480,7 +514,7 @@ func writeReportText(out io.Writer, report reportDocument) error {
 	fmt.Fprintf(summaryWriter, "Total tokens\t%d\n", report.Summary.TotalTokens)
 	fmt.Fprintf(summaryWriter, "Estimated cost (USD)\t%.6f\n", report.Summary.TotalCostUSD)
 	fmt.Fprintf(summaryWriter, "Active API keys\t%d\n", report.Summary.ActiveKeys)
-	fmt.Fprintf(summaryWriter, "Top model\t%s\n", reportValueOr(report.Summary.TopModel, "(none)"))
+	fmt.Fprintf(summaryWriter, "Top model\t%s\n", valueOr(report.Summary.TopModel, "(none)"))
 	if err := summaryWriter.Flush(); err != nil {
 		return err
 	}
@@ -506,7 +540,7 @@ func writeReportText(out io.Writer, report reportDocument) error {
 		modelWriter := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(modelWriter, "MODEL\tREQUESTS\tTOTAL_TOKENS\tTOTAL_COST_USD\tAVG_LATENCY_MS\tAVG_TTFT_MS")
 		for _, row := range report.Models {
-			fmt.Fprintf(modelWriter, "%s\t%d\t%d\t%.6f\t%.2f\t%.2f\n", reportValueOr(row.Model, "(unknown)"), row.RequestCount, row.TotalTokens, row.TotalCostUSD, row.AvgLatencyMS, row.AvgTTFTMS)
+			fmt.Fprintf(modelWriter, "%s\t%d\t%d\t%.6f\t%.2f\t%.2f\n", valueOr(row.Model, "(unknown)"), row.RequestCount, row.TotalTokens, row.TotalCostUSD, row.AvgLatencyMS, row.AvgTTFTMS)
 		}
 		if err := modelWriter.Flush(); err != nil {
 			return err
@@ -527,7 +561,7 @@ func writeReportText(out io.Writer, report reportDocument) error {
 				row.RequestCount,
 				row.TotalTokens,
 				row.TotalCostUSD,
-				reportTimeOr(row.LastActiveAt, "(none)"),
+				timeOr(row.LastActiveAt, "(none)"),
 			)
 		}
 		if err := keyWriter.Flush(); err != nil {
@@ -546,31 +580,24 @@ func writeReportText(out io.Writer, report reportDocument) error {
 		fmt.Fprintf(
 			traceWriter,
 			"%s\t%s\t%s\t%d\t%d\t%.6f\t%d\t%s\t%s\n",
-			reportTimeOr(row.Timestamp, "(unknown)"),
-			reportValueOr(row.Provider, "(unknown)"),
-			reportValueOr(row.Model, "(unknown)"),
+			timeOr(row.Timestamp, "(unknown)"),
+			valueOr(row.Provider, "(unknown)"),
+			valueOr(row.Model, "(unknown)"),
 			row.ResponseStatus,
 			row.TotalTokens,
 			row.EstimatedCost,
 			row.LatencyMS,
-			reportValueOr(row.RequestPath, "(unknown)"),
+			valueOr(row.RequestPath, "(unknown)"),
 			row.ID,
 		)
 	}
 	return traceWriter.Flush()
 }
 
-func reportValueOr(value string, fallback string) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return fallback
-	}
-	return trimmed
-}
-
-func reportTimeOr(value time.Time, fallback string) string {
+func reportOptionalTime(value time.Time) *time.Time {
 	if value.IsZero() {
-		return fallback
+		return nil
 	}
-	return value.UTC().Format(time.RFC3339)
+	utc := value.UTC()
+	return &utc
 }

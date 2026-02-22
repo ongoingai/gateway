@@ -16,6 +16,7 @@ type RouterOptions struct {
 	Store                   trace.TraceStore
 	StorageDriver           string
 	StoragePath             string
+	TracePipelineReader     trace.TracePipelineDiagnosticsReader
 	GatewayKeyStore         configstore.GatewayKeyStore
 	GatewayAuthHeader       string
 	GatewayKeyAuditRecorder GatewayKeyAuditRecorder
@@ -31,6 +32,9 @@ func NewRouter(options RouterOptions) http.Handler {
 		StorageDriver: options.StorageDriver,
 		StoragePath:   options.StoragePath,
 		Store:         options.Store,
+	}))
+	mux.Handle("/api/diagnostics/trace-pipeline", TracePipelineDiagnosticsHandler(TracePipelineDiagnosticsOptions{
+		Reader: options.TracePipelineReader,
 	}))
 	mux.Handle("/api/traces", TracesHandler(options.Store))
 	mux.Handle("/api/traces/", TraceDetailHandler(options.Store))

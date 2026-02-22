@@ -13,6 +13,7 @@ import (
 
 	"github.com/ongoingai/gateway/internal/auth"
 	"github.com/ongoingai/gateway/internal/config"
+	"github.com/ongoingai/gateway/internal/correlation"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -122,15 +123,17 @@ func TestSpanNames(t *testing.T) {
 // Cannot be parallel: mutates global OTel tracer provider.
 func TestSpanEnrichmentMiddleware(t *testing.T) {
 	tests := []struct {
-		name       string
-		statusCode int
-		identity   *auth.Identity
-		wantError  bool
-		wantAttrs  map[string]string
+		name          string
+		statusCode    int
+		identity      *auth.Identity
+		correlationID string
+		wantError     bool
+		wantAttrs     map[string]string
 	}{
 		{
-			name:       "5xx with full identity sets error status and all attributes",
-			statusCode: http.StatusBadGateway,
+			name:          "5xx with full identity sets error status and all attributes",
+			statusCode:    http.StatusBadGateway,
+			correlationID: "corr-otel-1",
 			identity: &auth.Identity{
 				KeyID:       "gwk_test_1",
 				OrgID:       "org-test",
@@ -139,10 +142,11 @@ func TestSpanEnrichmentMiddleware(t *testing.T) {
 			},
 			wantError: true,
 			wantAttrs: map[string]string{
-				"gateway.org_id":       "org-test",
-				"gateway.workspace_id": "workspace-test",
-				"gateway.key_id":       "gwk_test_1",
-				"gateway.role":         "developer",
+				"gateway.correlation_id": "corr-otel-1",
+				"gateway.org_id":         "org-test",
+				"gateway.workspace_id":   "workspace-test",
+				"gateway.key_id":         "gwk_test_1",
+				"gateway.role":           "developer",
 			},
 		},
 		{
@@ -176,11 +180,12 @@ func TestSpanEnrichmentMiddleware(t *testing.T) {
 			},
 		},
 		{
-			name:       "5xx without identity sets error status only",
-			statusCode: http.StatusServiceUnavailable,
-			identity:   nil,
-			wantError:  true,
-			wantAttrs:  nil,
+			name:          "5xx without identity sets error status only",
+			statusCode:    http.StatusServiceUnavailable,
+			identity:      nil,
+			correlationID: "corr-otel-2",
+			wantError:     true,
+			wantAttrs:     map[string]string{"gateway.correlation_id": "corr-otel-2"},
 		},
 		{
 			name:       "partial identity emits only populated fields",
@@ -223,6 +228,9 @@ func TestSpanEnrichmentMiddleware(t *testing.T) {
 			req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", nil)
 			if tt.identity != nil {
 				req = req.WithContext(auth.WithIdentity(req.Context(), tt.identity))
+			}
+			if tt.correlationID != "" {
+				req = req.WithContext(correlation.WithContext(req.Context(), tt.correlationID))
 			}
 			handler.ServeHTTP(httptest.NewRecorder(), req)
 

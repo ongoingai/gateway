@@ -13,9 +13,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ongoingai/gateway/internal/api"
 	"github.com/ongoingai/gateway/internal/auth"
 	"github.com/ongoingai/gateway/internal/config"
 	"github.com/ongoingai/gateway/internal/configstore"
+	"github.com/ongoingai/gateway/internal/correlation"
 )
 
 func TestShouldCaptureTrace(t *testing.T) {
@@ -162,6 +164,7 @@ func TestNewGatewayKeyProxyUsageRecorderLogsTouchFailures(t *testing.T) {
 	}
 	recorder := newGatewayKeyProxyUsageRecorder(logger, tracker)
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", nil)
+	req = req.WithContext(correlation.WithContext(req.Context(), "corr-usage-log-1"))
 	recorder(req, &auth.Identity{
 		KeyID:       "key-2",
 		OrgID:       "org-b",
@@ -177,5 +180,84 @@ func TestNewGatewayKeyProxyUsageRecorderLogsTouchFailures(t *testing.T) {
 	}
 	if !strings.Contains(logged, `"key_id":"key-2"`) {
 		t.Fatalf("logs=%q, want key_id", logged)
+	}
+	if !strings.Contains(logged, `"correlation_id":"corr-usage-log-1"`) {
+		t.Fatalf("logs=%q, want correlation_id", logged)
+	}
+}
+
+func TestNewProxyAuthAuditRecorderIncludesCorrelationID(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	recorder := newProxyAuthAuditRecorder(logger)
+	if recorder == nil {
+		t.Fatal("expected proxy audit recorder")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/openai/v1/chat/completions", nil)
+	req = req.WithContext(correlation.WithContext(req.Context(), "corr-audit-proxy-1"))
+	recorder(req, auth.AuditEvent{
+		Action:     "proxy_request",
+		Outcome:    "deny",
+		Reason:     "missing_permission",
+		StatusCode: http.StatusForbidden,
+		Path:       "/openai/v1/chat/completions",
+	})
+
+	logged := logs.String()
+	if !strings.Contains(logged, `"msg":"audit gateway auth deny"`) {
+		t.Fatalf("logs=%q, want audit log message", logged)
+	}
+	if !strings.Contains(logged, `"correlation_id":"corr-audit-proxy-1"`) {
+		t.Fatalf("logs=%q, want correlation_id", logged)
+	}
+}
+
+func TestNewGatewayKeyAuditRecorderIncludesCorrelationID(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	recorder := newGatewayKeyAuditRecorder(logger)
+	if recorder == nil {
+		t.Fatal("expected gateway key audit recorder")
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/gateway-keys", nil)
+	req = req.WithContext(correlation.WithContext(req.Context(), "corr-audit-key-1"))
+	recorder(req, api.GatewayKeyAuditEvent{
+		Action:      "create",
+		Outcome:     "allow",
+		StatusCode:  http.StatusCreated,
+		ActorKeyID:  "key-admin",
+		TargetKeyID: "key-new",
+	})
+
+	logged := logs.String()
+	if !strings.Contains(logged, `"msg":"audit gateway key lifecycle"`) {
+		t.Fatalf("logs=%q, want audit log message", logged)
+	}
+	if !strings.Contains(logged, `"correlation_id":"corr-audit-key-1"`) {
+		t.Fatalf("logs=%q, want correlation_id", logged)
+	}
+}
+
+func TestRequestCorrelationIDPrefersContextThenHeader(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest(http.MethodGet, "/openai/v1/chat/completions", nil)
+	req.Header.Set(correlation.HeaderName, "corr-from-header")
+	req = req.WithContext(correlation.WithContext(req.Context(), "corr-from-context"))
+
+	if got := requestCorrelationID(req); got != "corr-from-context" {
+		t.Fatalf("requestCorrelationID()=%q, want corr-from-context", got)
+	}
+
+	reqNoContext := httptest.NewRequest(http.MethodGet, "/openai/v1/chat/completions", nil)
+	reqNoContext.Header.Set(correlation.HeaderName, "corr-header-only")
+	if got := requestCorrelationID(reqNoContext); got != "corr-header-only" {
+		t.Fatalf("requestCorrelationID()=%q, want corr-header-only", got)
 	}
 }
