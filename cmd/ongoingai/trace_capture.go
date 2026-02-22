@@ -308,10 +308,7 @@ func extractModelFromJSON(body []byte) string {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return ""
 	}
-	if model, ok := payload["model"].(string); ok {
-		return model
-	}
-	return ""
+	return extractModelFromPayload(payload)
 }
 
 func extractModelFromSSE(body []byte) string {
@@ -331,7 +328,9 @@ func extractUsage(body []byte, streaming bool) (int, int, int) {
 }
 
 func extractUsageFromSSE(body []byte) (int, int, int) {
-	input, output, total := 0, 0, 0
+	input, output := 0, 0
+	total := 0
+	hasExplicitTotal := false
 	for _, payload := range ssePayloads(body) {
 		nextInput, nextOutput, nextTotal := extractUsageFromJSON(payload)
 		if nextInput > 0 {
@@ -342,9 +341,14 @@ func extractUsageFromSSE(body []byte) (int, int, int) {
 		}
 		if nextTotal > 0 {
 			total = nextTotal
+			hasExplicitTotal = true
 		}
 	}
-	if total == 0 {
+	if !hasExplicitTotal {
+		total = input + output
+	} else if total < input+output {
+		// Streaming providers can emit partial usage updates where total is
+		// stale relative to later input/output updates.
 		total = input + output
 	}
 	return input, output, total
@@ -356,8 +360,8 @@ func extractUsageFromJSON(body []byte) (int, int, int) {
 		return 0, 0, 0
 	}
 
-	usageObj, ok := payload["usage"].(map[string]any)
-	if !ok {
+	usageObj := extractUsageObject(payload)
+	if usageObj == nil {
 		return 0, 0, 0
 	}
 
@@ -369,6 +373,45 @@ func extractUsageFromJSON(body []byte) (int, int, int) {
 	}
 
 	return input, output, total
+}
+
+func extractModelFromPayload(payload map[string]any) string {
+	if payload == nil {
+		return ""
+	}
+	if model, ok := payload["model"].(string); ok {
+		model = strings.TrimSpace(model)
+		if model != "" {
+			return model
+		}
+	}
+
+	// Anthropic message_start events put model under message.model.
+	if message, ok := payload["message"].(map[string]any); ok {
+		if model, ok := message["model"].(string); ok {
+			model = strings.TrimSpace(model)
+			if model != "" {
+				return model
+			}
+		}
+	}
+	return ""
+}
+
+func extractUsageObject(payload map[string]any) map[string]any {
+	if payload == nil {
+		return nil
+	}
+	if usageObj, ok := payload["usage"].(map[string]any); ok {
+		return usageObj
+	}
+	// Anthropic message_start events can place usage under message.usage.
+	if message, ok := payload["message"].(map[string]any); ok {
+		if usageObj, ok := message["usage"].(map[string]any); ok {
+			return usageObj
+		}
+	}
+	return nil
 }
 
 func ssePayloads(body []byte) [][]byte {
