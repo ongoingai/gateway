@@ -1625,6 +1625,83 @@ func TestSetupDisabledReturnsNilPrometheusHandler(t *testing.T) {
 	}
 }
 
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestMakeWriteSpanHookScrubsCredentialInError(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	hook := runtime.MakeWriteSpanHook()
+	if hook == nil {
+		t.Fatal("MakeWriteSpanHook() returned nil")
+	}
+
+	// Simulate an error that leaks a credential (e.g. connection string with password).
+	endFn := hook(2)
+	endFn(errors.New("connect to host=db.example.com password=supersecret123 failed"))
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	attrs := spanAttrMap(spans[0])
+	errorClass := attrs["gateway.trace.write.error_class"]
+	if ContainsCredential(errorClass) {
+		t.Fatalf("credential leaked into span attribute: %q", errorClass)
+	}
+	if !strings.Contains(errorClass, "[CREDENTIAL_REDACTED]") {
+		t.Fatalf("error_class=%q, want redaction marker", errorClass)
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestOtelHTTPDoesNotCaptureAuthHeaders(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	handler := runtime.WrapHTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer sk_live_secret_key_value")
+	req.Header.Set("X-API-Key", "sk_test_another_secret_key")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	spans := recorder.Ended()
+	if len(spans) == 0 {
+		t.Fatal("no spans recorded")
+	}
+
+	for _, span := range spans {
+		for _, a := range span.Attributes() {
+			val := a.Value.Emit()
+			if ContainsCredential(val) {
+				t.Fatalf("credential found in span attribute %q=%q", a.Key, val)
+			}
+		}
+		for _, event := range span.Events() {
+			for _, a := range event.Attributes {
+				val := a.Value.Emit()
+				if ContainsCredential(val) {
+					t.Fatalf("credential found in event attribute %q=%q", a.Key, val)
+				}
+			}
+		}
+	}
+}
+
 func spanAttrMap(span sdktrace.ReadOnlySpan) map[string]string {
 	attrs := make(map[string]string)
 	for _, a := range span.Attributes() {

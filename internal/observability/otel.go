@@ -112,7 +112,7 @@ func Setup(ctx context.Context, cfg config.OTelConfig, serviceVersion string, lo
 
 		tracerProvider := sdktrace.NewTracerProvider(
 			sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.SamplingRatio))),
-			sdktrace.WithBatcher(traceExporter),
+			sdktrace.WithBatcher(newScrubbingExporter(traceExporter)),
 			sdktrace.WithResource(res),
 		)
 		otel.SetTracerProvider(tracerProvider)
@@ -295,6 +295,8 @@ func (r *Runtime) WrapHTTPHandler(next http.Handler) http.Handler {
 	if !r.Enabled() {
 		return next
 	}
+	// Header capture (WithMessageEvents, custom SpanStartOption) is intentionally
+	// not enabled to avoid leaking Authorization or X-API-Key values into spans.
 	return otelhttp.NewHandler(
 		next,
 		"gateway.request",
@@ -470,7 +472,7 @@ func (r *Runtime) MakeWriteSpanHook() func(batchSize int) func(error) {
 		span.SetAttributes(attribute.Int("gateway.trace.write.batch_size", batchSize))
 		return func(err error) {
 			if err != nil {
-				span.SetAttributes(attribute.String("gateway.trace.write.error_class", err.Error()))
+				span.SetAttributes(attribute.String("gateway.trace.write.error_class", ScrubCredentials(err.Error())))
 				span.SetStatus(codes.Error, "write failed")
 			}
 			span.End()
@@ -497,6 +499,8 @@ func (r *Runtime) WrapHTTPTransport(base http.RoundTripper) http.RoundTripper {
 	if !r.Enabled() {
 		return base
 	}
+	// Header capture is intentionally not enabled to avoid leaking upstream
+	// provider API keys (Authorization, X-API-Key) into outbound spans.
 	return otelhttp.NewTransport(
 		base,
 		otelhttp.WithSpanNameFormatter(func(_ string, req *http.Request) string {
