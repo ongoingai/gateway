@@ -183,11 +183,13 @@ func (w *Writer) Start(ctx context.Context) {
 				for len(batch) < writerBatchSize {
 					select {
 					case <-workerCtx.Done():
-						w.flushBatch(workerCtx, batch)
+						// Use a fresh context so the drain flush is not
+						// rejected by the store due to context cancellation.
+						w.flushBatch(context.Background(), batch)
 						return
 					case next, ok := <-w.queue:
 						if !ok {
-							w.flushBatch(workerCtx, batch)
+							w.flushBatch(context.Background(), batch)
 							return
 						}
 						if next != nil {

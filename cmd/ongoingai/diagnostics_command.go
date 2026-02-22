@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	defaultDiagnosticsFormat     = "text"
-	defaultDiagnosticsTarget     = "trace-pipeline"
-	defaultDiagnosticsTimeout    = 5 * time.Second
-	defaultGatewayAuthHeaderName = "X-OngoingAI-Gateway-Key"
+	defaultDiagnosticsFormat       = "text"
+	defaultDiagnosticsTarget       = "trace-pipeline"
+	defaultDiagnosticsTimeout      = 5 * time.Second
+	defaultGatewayAuthHeaderName   = "X-OngoingAI-Gateway-Key"
+	maxDiagnosticsResponseSize     = 1 << 20 // 1 MB
 )
 
 type tracePipelineDiagnosticsDocument struct {
@@ -158,15 +159,19 @@ func fetchTracePipelineDiagnostics(baseURL, authHeader, gatewayKey string, timeo
 		req.Header.Set(authHeader, gatewayKey)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
 	if err != nil {
 		return tracePipelineDiagnosticsDocument{}, fmt.Errorf("send request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDiagnosticsResponseSize+1))
 	if err != nil {
 		return tracePipelineDiagnosticsDocument{}, fmt.Errorf("read response: %w", err)
+	}
+	if int64(len(body)) > maxDiagnosticsResponseSize {
+		return tracePipelineDiagnosticsDocument{}, fmt.Errorf("response too large: %d bytes exceeds %d byte limit", len(body), maxDiagnosticsResponseSize)
 	}
 
 	if resp.StatusCode != http.StatusOK {

@@ -210,6 +210,48 @@ func TestRunDiagnosticsRejectsInvalidFormat(t *testing.T) {
 	}
 }
 
+func TestFetchTracePipelineDiagnosticsRejectsOversizedResponse(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Send a response larger than the maximum allowed size (1 MB).
+		data := make([]byte, 2*1024*1024)
+		for i := range data {
+			data[i] = 'x'
+		}
+		_, _ = w.Write(data)
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := fetchTracePipelineDiagnostics(server.URL, "X-Key", "", 5*time.Second)
+	if err == nil {
+		t.Fatal("expected error for oversized response, got nil")
+	}
+	if !strings.Contains(err.Error(), "response too large") {
+		t.Fatalf("err=%q, want response too large error", err)
+	}
+}
+
+func TestFetchTracePipelineDiagnosticsRespectsTimeout(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(tracePipelineDiagnosticsDocument{
+			SchemaVersion: "trace-pipeline-diagnostics.v1",
+			GeneratedAt:   time.Now(),
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := fetchTracePipelineDiagnostics(server.URL, "X-Key", "", 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+}
+
 func TestRunDiagnosticsReturnsErrorOnNon200(t *testing.T) {
 	t.Parallel()
 
