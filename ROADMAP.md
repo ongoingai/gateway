@@ -133,7 +133,7 @@ Planned work:
 - [x] Add OpenTelemetry spans for key gateway operations: auth evaluation, provider routing, trace enqueue, and storage writes.
 - [x] Add OpenTelemetry metric instruments (counters, histograms, gauges) for queue pressure, write throughput, provider health, and proxy latency.
 - [x] Ensure all new spans and metrics carry consistent tenant-scoped attributes (org, workspace, provider, model).
-- [ ] Add Prometheus-compatible metric export support.
+- [x] Add Prometheus-compatible metric export support.
 - [ ] Enforce credential scrubbing on all span attributes and metric labels so API keys, tokens, and provider credentials never leak into telemetry data.
 - [ ] Add tests for all new metrics, spans, and analytics paths, including regression tests for credential scrubbing in telemetry exports.
 - [ ] Update configuration reference, self-hosting guide, and troubleshooting docs to cover new observability features, Prometheus setup, and alerting recommendations.

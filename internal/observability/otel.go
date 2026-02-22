@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/ongoingai/gateway/internal/auth"
 	"github.com/ongoingai/gateway/internal/config"
 	"github.com/ongoingai/gateway/internal/correlation"
@@ -23,6 +25,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	promexporter "go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -53,6 +56,8 @@ type Runtime struct {
 	proxyRequestCounter           metric.Int64Counter
 	proxyRequestDurationHistogram metric.Float64Histogram
 
+	prometheusHandler http.Handler
+
 	shutdownFns []func(context.Context) error
 }
 
@@ -69,15 +74,22 @@ func Setup(ctx context.Context, cfg config.OTelConfig, serviceVersion string, lo
 
 	exportTimeout := time.Duration(cfg.ExportTimeoutMS) * time.Millisecond
 	metricInterval := time.Duration(cfg.MetricExportIntervalMS) * time.Millisecond
-	otlpEndpoint, inferredInsecure, err := normalizeOTLPEndpoint(cfg.Endpoint)
-	if err != nil {
-		return nil, err
-	}
+
+	// OTLP endpoint is only needed when traces or OTLP metrics push is enabled.
+	var otlpEndpoint string
 	insecure := cfg.Insecure
-	if strings.Contains(strings.TrimSpace(cfg.Endpoint), "://") {
-		// Endpoint URLs carry explicit transport intent and win over the
-		// insecure toggle to avoid mismatches like https endpoints + insecure=true.
-		insecure = inferredInsecure
+	if cfg.TracesEnabled || cfg.MetricsEnabled {
+		var inferredInsecure bool
+		var err error
+		otlpEndpoint, inferredInsecure, err = normalizeOTLPEndpoint(cfg.Endpoint)
+		if err != nil {
+			return nil, err
+		}
+		if strings.Contains(strings.TrimSpace(cfg.Endpoint), "://") {
+			// Endpoint URLs carry explicit transport intent and win over the
+			// insecure toggle to avoid mismatches like https endpoints + insecure=true.
+			insecure = inferredInsecure
+		}
 	}
 
 	res := resource.NewSchemaless(
@@ -107,6 +119,9 @@ func Setup(ctx context.Context, cfg config.OTelConfig, serviceVersion string, lo
 		runtime.shutdownFns = append(runtime.shutdownFns, tracerProvider.Shutdown)
 	}
 
+	var meterOpts []sdkmetric.Option
+	meterOpts = append(meterOpts, sdkmetric.WithResource(res))
+
 	if cfg.MetricsEnabled {
 		metricExporterOptions := []otlpmetrichttp.Option{
 			otlpmetrichttp.WithEndpoint(otlpEndpoint),
@@ -126,10 +141,22 @@ func Setup(ctx context.Context, cfg config.OTelConfig, serviceVersion string, lo
 			sdkmetric.WithInterval(metricInterval),
 			sdkmetric.WithTimeout(exportTimeout),
 		)
-		meterProvider := sdkmetric.NewMeterProvider(
-			sdkmetric.WithResource(res),
-			sdkmetric.WithReader(reader),
-		)
+		meterOpts = append(meterOpts, sdkmetric.WithReader(reader))
+	}
+
+	if cfg.PrometheusEnabled {
+		reg := prometheus.NewRegistry()
+		promReader, err := promexporter.New(promexporter.WithRegisterer(reg))
+		if err != nil {
+			_ = runtime.Shutdown(context.Background())
+			return nil, fmt.Errorf("initialize prometheus metric exporter: %w", err)
+		}
+		meterOpts = append(meterOpts, sdkmetric.WithReader(promReader))
+		runtime.prometheusHandler = promhttp.HandlerFor(reg, promhttp.HandlerOpts{})
+	}
+
+	if cfg.MetricsEnabled || cfg.PrometheusEnabled {
+		meterProvider := sdkmetric.NewMeterProvider(meterOpts...)
 		otel.SetMeterProvider(meterProvider)
 		runtime.shutdownFns = append(runtime.shutdownFns, meterProvider.Shutdown)
 	}
@@ -238,6 +265,7 @@ func Setup(ctx context.Context, cfg config.OTelConfig, serviceVersion string, lo
 			"otel_endpoint", otlpEndpoint,
 			"otel_traces_enabled", cfg.TracesEnabled,
 			"otel_metrics_enabled", cfg.MetricsEnabled,
+			"otel_prometheus_enabled", cfg.PrometheusEnabled,
 			"otel_sampling_ratio", cfg.SamplingRatio,
 		)
 	}
@@ -248,6 +276,15 @@ func Setup(ctx context.Context, cfg config.OTelConfig, serviceVersion string, lo
 // Enabled reports whether OpenTelemetry instrumentation is active.
 func (r *Runtime) Enabled() bool {
 	return r != nil && r.enabled
+}
+
+// PrometheusHandler returns the HTTP handler for Prometheus metric scraping,
+// or nil when Prometheus export is not enabled.
+func (r *Runtime) PrometheusHandler() http.Handler {
+	if r == nil {
+		return nil
+	}
+	return r.prometheusHandler
 }
 
 // WrapHTTPHandler wraps an inbound HTTP handler with OpenTelemetry spans.

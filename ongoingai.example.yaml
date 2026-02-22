@@ -27,6 +27,8 @@ observability:
     service_name: ongoingai-gateway
     traces_enabled: true
     metrics_enabled: true
+    # prometheus_enabled: false
+    # prometheus_path: /metrics
     sampling_ratio: 1.0
     export_timeout_ms: 3000
     metric_export_interval_ms: 10000

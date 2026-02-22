@@ -580,13 +580,14 @@ func TestValidateRejectsOTelEnabledWithoutSignals(t *testing.T) {
 	cfg.Observability.OTel.Enabled = true
 	cfg.Observability.OTel.TracesEnabled = false
 	cfg.Observability.OTel.MetricsEnabled = false
+	cfg.Observability.OTel.PrometheusEnabled = false
 
 	err := Validate(cfg)
 	if err == nil {
 		t.Fatal("Validate() error=nil, want observability.otel traces/metrics validation error")
 	}
-	if !strings.Contains(err.Error(), "observability.otel requires traces_enabled and/or metrics_enabled") {
-		t.Fatalf("error=%q, want traces/metrics validation message", err.Error())
+	if !strings.Contains(err.Error(), "observability.otel requires") {
+		t.Fatalf("error=%q, want signal validation message", err.Error())
 	}
 }
 
@@ -603,5 +604,110 @@ func TestValidateRejectsOTelEnabledWithoutEndpoint(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "observability.otel.endpoint is required") {
 		t.Fatalf("error=%q, want endpoint validation message", err.Error())
+	}
+}
+
+func TestDefaultPrometheusConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	if cfg.Observability.OTel.PrometheusEnabled {
+		t.Fatal("default prometheus_enabled should be false")
+	}
+	if cfg.Observability.OTel.PrometheusPath != "/metrics" {
+		t.Fatalf("default prometheus_path=%q, want /metrics", cfg.Observability.OTel.PrometheusPath)
+	}
+}
+
+func TestValidateAcceptsPrometheusOnlyConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Observability.OTel.Enabled = true
+	cfg.Observability.OTel.TracesEnabled = false
+	cfg.Observability.OTel.MetricsEnabled = false
+	cfg.Observability.OTel.PrometheusEnabled = true
+
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("Validate() error=%v, want nil for prometheus-only config", err)
+	}
+}
+
+func TestValidateRejectsPrometheusPathWithoutSlash(t *testing.T) {
+	t.Parallel()
+
+	cfg := Default()
+	cfg.Observability.OTel.Enabled = true
+	cfg.Observability.OTel.PrometheusEnabled = true
+	cfg.Observability.OTel.PrometheusPath = "metrics"
+
+	err := Validate(cfg)
+	if err == nil {
+		t.Fatal("Validate() error=nil, want prometheus_path validation error")
+	}
+	if !strings.Contains(err.Error(), "prometheus_path must start with '/'") {
+		t.Fatalf("error=%q, want prometheus_path validation message", err.Error())
+	}
+}
+
+func TestValidateRejectsPrometheusPathCollidingWithReservedPrefixes(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{"/api/metrics", "/openai/metrics", "/anthropic/metrics"} {
+		t.Run(path, func(t *testing.T) {
+			t.Parallel()
+
+			cfg := Default()
+			cfg.Observability.OTel.Enabled = true
+			cfg.Observability.OTel.PrometheusEnabled = true
+			cfg.Observability.OTel.PrometheusPath = path
+
+			err := Validate(cfg)
+			if err == nil {
+				t.Fatalf("Validate() error=nil, want prometheus_path collision error for %q", path)
+			}
+			if !strings.Contains(err.Error(), "must not overlap") {
+				t.Fatalf("error=%q, want overlap validation message", err.Error())
+			}
+		})
+	}
+}
+
+func TestLoadPrometheusEnvOverrides(t *testing.T) {
+	t.Setenv("ONGOINGAI_PROMETHEUS_ENABLED", "true")
+	t.Setenv("ONGOINGAI_PROMETHEUS_PATH", "/prom")
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if !cfg.Observability.OTel.PrometheusEnabled {
+		t.Fatal("prometheus_enabled should be true from env override")
+	}
+	if cfg.Observability.OTel.PrometheusPath != "/prom" {
+		t.Fatalf("prometheus_path=%q, want /prom from env override", cfg.Observability.OTel.PrometheusPath)
+	}
+	if !cfg.Observability.OTel.Enabled {
+		t.Fatal("otel.enabled should be true when prometheus env is configured")
+	}
+}
+
+func TestLoadMetricsExporterPrometheusEnv(t *testing.T) {
+	t.Setenv("OTEL_METRICS_EXPORTER", "prometheus")
+
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	if !cfg.Observability.OTel.PrometheusEnabled {
+		t.Fatal("prometheus_enabled should be true from OTEL_METRICS_EXPORTER=prometheus")
+	}
+	if cfg.Observability.OTel.MetricsEnabled {
+		t.Fatal("metrics_enabled should be false when OTEL_METRICS_EXPORTER=prometheus")
+	}
+	if !cfg.Observability.OTel.Enabled {
+		t.Fatal("otel.enabled should be true when OTEL_METRICS_EXPORTER is configured")
 	}
 }

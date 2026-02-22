@@ -556,6 +556,18 @@ func runServe(args []string) int {
 	if otelRuntime != nil {
 		serverHandler = otelRuntime.WrapHTTPHandler(serverHandler)
 	}
+	if otelRuntime != nil && otelRuntime.PrometheusHandler() != nil {
+		promPath := cfg.Observability.OTel.PrometheusPath
+		promHandler := otelRuntime.PrometheusHandler()
+		inner := serverHandler
+		serverHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == promPath {
+				promHandler.ServeHTTP(w, r)
+				return
+			}
+			inner.ServeHTTP(w, r)
+		})
+	}
 	server := newGatewayServer(cfg, logger, serverHandler)
 
 	logger.Info(
@@ -567,6 +579,8 @@ func runServe(args []string) int {
 		"providers", configuredProviderSummaries(cfg),
 		"config_path", *configPath,
 		"auth_enabled", cfg.Auth.Enabled,
+		"prometheus_enabled", cfg.Observability.OTel.PrometheusEnabled,
+		"prometheus_path", cfg.Observability.OTel.PrometheusPath,
 	)
 
 	ctx, stop := signalNotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

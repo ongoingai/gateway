@@ -728,6 +728,10 @@ func TestRuntimeGuardsDoNotPanic(t *testing.T) {
 			tt.runtime.RegisterTraceQueueDepthGauge(func() int { return 0 })
 			tt.runtime.RegisterTraceQueueCapacityGauge(func() int { return 256 })
 
+			if tt.runtime.PrometheusHandler() != nil {
+				t.Fatal("PrometheusHandler() should be nil when disabled")
+			}
+
 			if err := tt.runtime.Shutdown(context.Background()); err != nil {
 				t.Fatalf("Shutdown() error: %v", err)
 			}
@@ -1496,7 +1500,128 @@ func TestSpanWrappersNoopWhenDisabled(t *testing.T) {
 			tt.runtime.RecordTraceWritten(5)
 			tt.runtime.RecordProxyRequest("openai", "org-1", "ws-1", "/openai/v1/chat", 200, 500)
 			tt.runtime.RegisterTraceQueueCapacityGauge(func() int { return 128 })
+
+			if tt.runtime.PrometheusHandler() != nil {
+				t.Fatal("PrometheusHandler() should be nil when disabled")
+			}
 		})
+	}
+}
+
+// Cannot be parallel: mutates global OTel providers.
+func TestSetupPrometheusCreatesHandler(t *testing.T) {
+	oldMP := otel.GetMeterProvider()
+	defer otel.SetMeterProvider(oldMP)
+
+	runtime, err := Setup(context.Background(), config.OTelConfig{
+		Enabled:                true,
+		Endpoint:               "localhost:4318",
+		ServiceName:            "test-prometheus",
+		TracesEnabled:          false,
+		MetricsEnabled:         false,
+		PrometheusEnabled:      true,
+		PrometheusPath:         "/metrics",
+		SamplingRatio:          1.0,
+		ExportTimeoutMS:        1000,
+		MetricExportIntervalMS: 10000,
+	}, "test", nil)
+	if err != nil {
+		t.Fatalf("Setup() error: %v", err)
+	}
+	defer func() { _ = runtime.Shutdown(context.Background()) }()
+
+	handler := runtime.PrometheusHandler()
+	if handler == nil {
+		t.Fatal("PrometheusHandler() returned nil, want non-nil handler")
+	}
+
+	// Scrape the handler and verify it returns metric content.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prometheus scrape status=%d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if body == "" {
+		t.Fatal("prometheus scrape returned empty body")
+	}
+}
+
+// Cannot be parallel: mutates global OTel providers.
+func TestSetupPrometheusAndOTLPCoexist(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	oldMP := otel.GetMeterProvider()
+	oldProp := otel.GetTextMapPropagator()
+	defer func() {
+		otel.SetTracerProvider(oldTP)
+		otel.SetMeterProvider(oldMP)
+		otel.SetTextMapPropagator(oldProp)
+	}()
+
+	var metricRequests atomic.Int64
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		if r.URL.Path == "/v1/metrics" {
+			metricRequests.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
+	runtime, err := Setup(context.Background(), config.OTelConfig{
+		Enabled:                true,
+		Endpoint:               collector.URL,
+		ServiceName:            "test-dual",
+		TracesEnabled:          false,
+		MetricsEnabled:         true,
+		PrometheusEnabled:      true,
+		PrometheusPath:         "/metrics",
+		SamplingRatio:          1.0,
+		ExportTimeoutMS:        1000,
+		MetricExportIntervalMS: 25,
+	}, "test", nil)
+	if err != nil {
+		t.Fatalf("Setup() error: %v", err)
+	}
+
+	// Record a metric so the OTLP reader has something to export.
+	runtime.RecordTraceEnqueued()
+
+	// Verify Prometheus handler is available and works.
+	handler := runtime.PrometheusHandler()
+	if handler == nil {
+		t.Fatal("PrometheusHandler() returned nil, want non-nil when both enabled")
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prometheus scrape status=%d, want 200", rec.Code)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := runtime.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error: %v", err)
+	}
+
+	// Verify OTLP push also received metrics.
+	waitFor(t, 2*time.Second, func() bool {
+		return metricRequests.Load() > 0
+	})
+}
+
+func TestSetupDisabledReturnsNilPrometheusHandler(t *testing.T) {
+	t.Parallel()
+
+	runtime, err := Setup(context.Background(), config.OTelConfig{Enabled: false}, "test", nil)
+	if err != nil {
+		t.Fatalf("Setup() error: %v", err)
+	}
+	if runtime.PrometheusHandler() != nil {
+		t.Fatal("PrometheusHandler() should be nil when disabled")
 	}
 }
 
