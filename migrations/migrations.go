@@ -36,6 +36,16 @@ func Apply(ctx context.Context, db *sql.DB, driver string) error {
 		return fmt.Errorf("unsupported migration driver %q", driver)
 	}
 
+	if driver == DriverPostgres {
+		// Serialize concurrent migration runs to prevent races on DDL
+		// statements like CREATE TABLE IF NOT EXISTS which can conflict
+		// on implicit composite type creation in pg_type.
+		if _, err := db.ExecContext(ctx, "SELECT pg_advisory_lock(8067396491); -- ongoingai_migrations"); err != nil {
+			return fmt.Errorf("acquire migration advisory lock: %w", err)
+		}
+		defer db.ExecContext(ctx, "SELECT pg_advisory_unlock(8067396491)") //nolint:errcheck
+	}
+
 	if err := ensureMigrationsTable(ctx, db, driver); err != nil {
 		return err
 	}

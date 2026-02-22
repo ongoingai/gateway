@@ -38,7 +38,7 @@ Default header:
 | Permission | Meaning |
 | --- | --- |
 | `proxy:write` | Send requests through provider proxy routes (`/openai/*`, `/anthropic/*`). |
-| `analytics:read` | Read traces and analytics APIs. |
+| `analytics:read` | Read traces, diagnostics, and analytics APIs. |
 | `keys:manage` | List, create, rotate, and revoke gateway keys. |
 
 ## Role defaults
@@ -60,6 +60,7 @@ Explicit `permissions` values on a key are additive.
 | --- | --- | --- | --- | --- | --- |
 | `health` | `read` | `public` | `GET`, `HEAD` | `/api/health` | none |
 | `traces` | `read` | `workspace` | `GET`, `HEAD` | `/api/traces`, `/api/traces/:id` | `analytics:read` |
+| `diagnostics` | `read` | `workspace` | `GET`, `HEAD` | `/api/diagnostics/trace-pipeline` | `analytics:read` |
 | `analytics` | `read` | `workspace` | `GET`, `HEAD` | `/api/analytics/*` | `analytics:read` |
 | `gateway_keys` | `manage` | `workspace` | `GET`, `POST`, `DELETE` | `/api/gateway-keys*` | `keys:manage` |
 | `proxy` | `forward` | `workspace` | `*` | `/openai/*`, `/anthropic/*` | `proxy:write` |

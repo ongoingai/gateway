@@ -390,6 +390,14 @@ func requiredAccess(method, path, apiPrefix, openAIPrefix, anthropicPrefix strin
 				scope:          "workspace",
 				permission:     PermissionAnalyticsRead,
 			}
+		case isDiagnosticsPath(path, apiPrefix) && isReadMethod(method):
+			return accessDecision{
+				mode:           accessModeRequirePermission,
+				resource:       "diagnostics",
+				resourceAction: "read",
+				scope:          "workspace",
+				permission:     PermissionAnalyticsRead,
+			}
 		case path == apiPrefix+"/gateway-keys" && (method == http.MethodGet || method == http.MethodPost):
 			return accessDecision{
 				mode:           accessModeRequirePermission,
@@ -499,6 +507,14 @@ func AuthorizationMatrix() []AuthorizationRule {
 			Permission: PermissionAnalyticsRead,
 		},
 		{
+			Resource:   "diagnostics",
+			Action:     "read",
+			Scope:      "workspace",
+			Methods:    []string{http.MethodGet, http.MethodHead},
+			Path:       "/api/diagnostics/trace-pipeline",
+			Permission: PermissionAnalyticsRead,
+		},
+		{
 			Resource:   "gateway_keys",
 			Action:     "manage",
 			Scope:      "workspace",
@@ -579,6 +595,15 @@ func isAnalyticsPath(path, apiPrefix string) bool {
 		apiPrefix + "/analytics/models",
 		apiPrefix + "/analytics/keys",
 		apiPrefix + "/analytics/summary":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDiagnosticsPath(path, apiPrefix string) bool {
+	switch path {
+	case apiPrefix + "/diagnostics/trace-pipeline":
 		return true
 	default:
 		return false

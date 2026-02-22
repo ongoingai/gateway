@@ -15,6 +15,7 @@ import (
 
 	"github.com/ongoingai/gateway/internal/auth"
 	"github.com/ongoingai/gateway/internal/config"
+	"github.com/ongoingai/gateway/internal/correlation"
 	"github.com/ongoingai/gateway/internal/pathutil"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -202,23 +203,25 @@ func (r *Runtime) SpanEnrichmentMiddleware(next http.Handler) http.Handler {
 			span.SetStatus(codes.Error, fmt.Sprintf("http %d", statusCode))
 		}
 
-		identity, ok := auth.IdentityFromContext(req.Context())
-		if !ok || identity == nil {
-			return
+		attrs := make([]attribute.KeyValue, 0, 5)
+		if correlationID, ok := correlation.FromContext(req.Context()); ok {
+			attrs = append(attrs, attribute.String("gateway.correlation_id", correlationID))
 		}
 
-		attrs := make([]attribute.KeyValue, 0, 4)
-		if orgID := strings.TrimSpace(identity.OrgID); orgID != "" {
-			attrs = append(attrs, attribute.String("gateway.org_id", orgID))
-		}
-		if workspaceID := strings.TrimSpace(identity.WorkspaceID); workspaceID != "" {
-			attrs = append(attrs, attribute.String("gateway.workspace_id", workspaceID))
-		}
-		if gatewayKeyID := strings.TrimSpace(identity.KeyID); gatewayKeyID != "" {
-			attrs = append(attrs, attribute.String("gateway.key_id", gatewayKeyID))
-		}
-		if role := strings.TrimSpace(identity.Role); role != "" {
-			attrs = append(attrs, attribute.String("gateway.role", role))
+		identity, ok := auth.IdentityFromContext(req.Context())
+		if ok && identity != nil {
+			if orgID := strings.TrimSpace(identity.OrgID); orgID != "" {
+				attrs = append(attrs, attribute.String("gateway.org_id", orgID))
+			}
+			if workspaceID := strings.TrimSpace(identity.WorkspaceID); workspaceID != "" {
+				attrs = append(attrs, attribute.String("gateway.workspace_id", workspaceID))
+			}
+			if gatewayKeyID := strings.TrimSpace(identity.KeyID); gatewayKeyID != "" {
+				attrs = append(attrs, attribute.String("gateway.key_id", gatewayKeyID))
+			}
+			if role := strings.TrimSpace(identity.Role); role != "" {
+				attrs = append(attrs, attribute.String("gateway.role", role))
+			}
 		}
 		if len(attrs) > 0 {
 			span.SetAttributes(attrs...)

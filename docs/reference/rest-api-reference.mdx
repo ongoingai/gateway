@@ -15,7 +15,7 @@ It covers auth requirements, query validation, and response shapes.
 
 ## What this API includes
 
-- Included: service metadata, health, traces, analytics, and gateway key
+- Included: service metadata, health, diagnostics, traces, analytics, and gateway key
   management endpoints.
 - Not included: provider proxy pass-through routes (`/openai/...`,
   `/anthropic/...`).
@@ -30,6 +30,8 @@ jobs.
 - Local default base URL: `http://localhost:8080`
 - Request and response content type: `application/json`
 - Timestamps in responses use RFC3339 format in UTC.
+- Responses include `X-OngoingAI-Correlation-ID` for request-level incident
+  pivoting across logs, spans, and stored trace metadata.
 - Date query fields accept:
   - RFC3339 (for example `2026-02-12T15:04:05Z`)
   - Date-only `YYYY-MM-DD`
@@ -45,6 +47,7 @@ If `auth.enabled=true`, the permission matrix is:
 | Route pattern | Permission |
 | --- | --- |
 | `/api/health` | Public |
+| `/api/diagnostics/trace-pipeline` | `analytics:read` |
 | `/api/traces`, `/api/traces/:id`, `/api/traces/:id/replay`, `/api/traces/:id/fork` | `analytics:read` |
 | `/api/analytics/*` | `analytics:read` |
 | `/api/gateway-keys*` | `keys:manage` |
@@ -80,12 +83,13 @@ Common auth-related responses when `auth.enabled=true`:
 
 ## Endpoint contracts
 
-### Root and health
+### Root, health, and diagnostics
 
 | Method | Path | Auth | Success |
 | --- | --- | --- | --- |
 | `GET` | `/` | Public | `200` service metadata |
 | `GET` | `/api/health` | Public | `200` health summary |
+| `GET` | `/api/diagnostics/trace-pipeline` | `analytics:read` when auth is enabled | `200` trace pipeline diagnostics |
 
 `GET /` response fields:
 - `name`
@@ -100,11 +104,32 @@ Common auth-related responses when `auth.enabled=true`:
 - `trace_count`
 - `db_size_bytes` (present for SQLite when file metadata is available)
 
+`GET /api/diagnostics/trace-pipeline` response fields:
+- `schema_version` (`trace-pipeline-diagnostics.v1`)
+- `generated_at`
+- `diagnostics`:
+  - `queue_capacity`
+  - `queue_depth`
+  - `queue_depth_high_watermark`
+  - `queue_utilization_pct`
+  - `queue_high_watermark_utilization_pct`
+  - `queue_pressure_state` (`ok`, `elevated`, `high`, `saturated`)
+  - `queue_high_watermark_pressure_state` (`ok`, `elevated`, `high`, `saturated`)
+  - `enqueue_accepted_total`
+  - `enqueue_dropped_total`
+  - `write_dropped_total`
+  - `total_dropped_total`
+  - `last_enqueue_drop_at` (optional)
+  - `last_write_drop_at` (optional)
+  - `last_write_drop_operation` (optional)
+
 Example:
 
 ```bash filename="Terminal"
 curl http://localhost:8080/
 curl http://localhost:8080/api/health
+curl "http://localhost:8080/api/diagnostics/trace-pipeline" \
+  -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
 ```
 
 ### Traces

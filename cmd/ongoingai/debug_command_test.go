@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,8 +57,20 @@ func TestRunDebugByTraceIDJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("decode debug json: %v\nbody=%s", err, stdout.String())
 	}
+	if payload.SchemaVersion != debugSchemaVersion {
+		t.Fatalf("schema_version=%q, want %q", payload.SchemaVersion, debugSchemaVersion)
+	}
 	if payload.SourceTraceID != "trace-step-1" {
 		t.Fatalf("source_trace_id=%q, want trace-step-1", payload.SourceTraceID)
+	}
+	if payload.Selection.TraceID != "trace-step-1" {
+		t.Fatalf("selection.trace_id=%q, want trace-step-1", payload.Selection.TraceID)
+	}
+	if payload.Options.Limit != 10 {
+		t.Fatalf("options.limit=%d, want 10", payload.Options.Limit)
+	}
+	if payload.Options.IncludeDiff || payload.Options.IncludeHeaders || payload.Options.IncludeBodies {
+		t.Fatalf("options=%+v, want diff/headers/bodies false", payload.Options)
 	}
 	if payload.Chain.CheckpointCount != 2 {
 		t.Fatalf("checkpoint_count=%d, want 2", payload.Chain.CheckpointCount)
@@ -95,11 +108,86 @@ func TestRunDebugByTraceGroupIDJSON(t *testing.T) {
 	if payload.Chain.LineageIdentifier != "trace_group_id" {
 		t.Fatalf("lineage_identifier=%q, want trace_group_id", payload.Chain.LineageIdentifier)
 	}
+	if payload.Selection.TraceGroupID != "group-demo" {
+		t.Fatalf("selection.trace_group_id=%q, want group-demo", payload.Selection.TraceGroupID)
+	}
 	if payload.Chain.GroupID != "group-demo" {
 		t.Fatalf("group_id=%q, want group-demo", payload.Chain.GroupID)
 	}
 	if payload.Chain.CheckpointCount != 2 {
 		t.Fatalf("checkpoint_count=%d, want 2", payload.Chain.CheckpointCount)
+	}
+}
+
+func TestRunDebugByTraceGroupIDJSONPostgres(t *testing.T) {
+	t.Parallel()
+
+	configPath, ids := writeDebugPostgresTestFixture(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDebug([]string{"--config", configPath, "--trace-group-id", ids.GroupID, "--format", "json", "--limit", "10"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runDebug() code=%d, stderr=%q", code, stderr.String())
+	}
+
+	var payload debugDocument
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode debug json: %v\nbody=%s", err, stdout.String())
+	}
+	if payload.SchemaVersion != debugSchemaVersion {
+		t.Fatalf("schema_version=%q, want %q", payload.SchemaVersion, debugSchemaVersion)
+	}
+	if payload.SourceTraceID != ids.TraceStep2 {
+		t.Fatalf("source_trace_id=%q, want %q", payload.SourceTraceID, ids.TraceStep2)
+	}
+	if payload.Chain.LineageIdentifier != "trace_group_id" {
+		t.Fatalf("lineage_identifier=%q, want trace_group_id", payload.Chain.LineageIdentifier)
+	}
+	if payload.Selection.TraceGroupID != ids.GroupID {
+		t.Fatalf("selection.trace_group_id=%q, want %q", payload.Selection.TraceGroupID, ids.GroupID)
+	}
+	if payload.Chain.GroupID != ids.GroupID {
+		t.Fatalf("group_id=%q, want %q", payload.Chain.GroupID, ids.GroupID)
+	}
+	if payload.Chain.CheckpointCount != 2 {
+		t.Fatalf("checkpoint_count=%d, want 2", payload.Chain.CheckpointCount)
+	}
+	if len(payload.Chain.Checkpoints) != 2 {
+		t.Fatalf("checkpoints=%d, want 2", len(payload.Chain.Checkpoints))
+	}
+	if payload.Chain.Checkpoints[0].ID != ids.TraceStep1 || payload.Chain.Checkpoints[1].ID != ids.TraceStep2 {
+		t.Fatalf("checkpoint ids=%+v, want %q then %q", payload.Chain.Checkpoints, ids.TraceStep1, ids.TraceStep2)
+	}
+}
+
+func TestRunDebugByTraceIDJSONReconstructsOutOfOrderLineage(t *testing.T) {
+	t.Parallel()
+
+	configPath, ids := writeDebugOutOfOrderLineageFixture(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runDebug([]string{"--config", configPath, "--trace-id", ids.TraceStep3, "--format", "json", "--limit", "10"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runDebug() code=%d, stderr=%q", code, stderr.String())
+	}
+
+	var payload debugDocument
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("decode debug json: %v\nbody=%s", err, stdout.String())
+	}
+	if payload.SourceTraceID != ids.TraceStep3 {
+		t.Fatalf("source_trace_id=%q, want %q", payload.SourceTraceID, ids.TraceStep3)
+	}
+	if payload.Chain.CheckpointCount != 3 {
+		t.Fatalf("checkpoint_count=%d, want 3", payload.Chain.CheckpointCount)
+	}
+	if len(payload.Chain.Checkpoints) != 3 {
+		t.Fatalf("checkpoints=%d, want 3", len(payload.Chain.Checkpoints))
+	}
+	if payload.Chain.Checkpoints[0].ID != ids.TraceStep1 || payload.Chain.Checkpoints[1].ID != ids.TraceStep2 || payload.Chain.Checkpoints[2].ID != ids.TraceStep3 {
+		t.Fatalf("checkpoint order=%+v, want %q -> %q -> %q", payload.Chain.Checkpoints, ids.TraceStep1, ids.TraceStep2, ids.TraceStep3)
 	}
 }
 
@@ -398,4 +486,221 @@ func writeDebugTestFixture(t *testing.T, seedTraces bool) string {
 		t.Fatalf("write config: %v", err)
 	}
 	return configPath
+}
+
+type debugOutOfOrderFixtureIDs struct {
+	GroupID    string
+	TraceStep1 string
+	TraceStep2 string
+	TraceStep3 string
+}
+
+func writeDebugOutOfOrderLineageFixture(t *testing.T) (string, debugOutOfOrderFixtureIDs) {
+	t.Helper()
+
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "debug-out-of-order.db")
+	store, err := trace.NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("create sqlite store: %v", err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("close sqlite store: %v", err)
+		}
+	}()
+
+	base := time.Date(2026, 2, 19, 10, 0, 0, 0, time.UTC)
+	ids := debugOutOfOrderFixtureIDs{
+		GroupID:    "group-out-of-order",
+		TraceStep1: "trace-ooo-step-1",
+		TraceStep2: "trace-ooo-step-2",
+		TraceStep3: "trace-ooo-step-3",
+	}
+	traces := []*trace.Trace{
+		{
+			ID:               ids.TraceStep3,
+			Timestamp:        base,
+			CreatedAt:        base,
+			TraceGroupID:     ids.GroupID,
+			Provider:         "anthropic",
+			Model:            "claude-sonnet-4-latest",
+			RequestMethod:    "POST",
+			RequestPath:      "/anthropic/v1/messages",
+			ResponseStatus:   200,
+			InputTokens:      14,
+			OutputTokens:     10,
+			TotalTokens:      24,
+			LatencyMS:        210,
+			EstimatedCostUSD: 0.00031,
+			Metadata:         `{"lineage_group_id":"group-out-of-order","lineage_thread_id":"thread-out-of-order","lineage_run_id":"run-out-of-order","lineage_checkpoint_id":"trace-ooo-step-3","lineage_parent_checkpoint_id":"trace-ooo-step-2","lineage_immutable":true}`,
+		},
+		{
+			ID:               ids.TraceStep2,
+			Timestamp:        base.Add(5 * time.Minute),
+			CreatedAt:        base.Add(5 * time.Minute),
+			TraceGroupID:     ids.GroupID,
+			Provider:         "openai",
+			Model:            "gpt-4o",
+			RequestMethod:    "POST",
+			RequestPath:      "/openai/v1/chat/completions",
+			ResponseStatus:   200,
+			InputTokens:      10,
+			OutputTokens:     8,
+			TotalTokens:      18,
+			LatencyMS:        160,
+			EstimatedCostUSD: 0.00021,
+			Metadata:         `{"lineage_group_id":"group-out-of-order","lineage_thread_id":"thread-out-of-order","lineage_run_id":"run-out-of-order","lineage_checkpoint_id":"trace-ooo-step-2","lineage_parent_checkpoint_id":"trace-ooo-step-1","lineage_checkpoint_seq":2,"lineage_immutable":true}`,
+		},
+		{
+			ID:               ids.TraceStep1,
+			Timestamp:        base.Add(4 * time.Minute),
+			CreatedAt:        base.Add(4 * time.Minute),
+			TraceGroupID:     ids.GroupID,
+			Provider:         "openai",
+			Model:            "gpt-4o-mini",
+			RequestMethod:    "POST",
+			RequestPath:      "/openai/v1/chat/completions",
+			ResponseStatus:   200,
+			InputTokens:      8,
+			OutputTokens:     6,
+			TotalTokens:      14,
+			LatencyMS:        140,
+			EstimatedCostUSD: 0.00016,
+			Metadata:         `{"lineage_group_id":"group-out-of-order","lineage_thread_id":"thread-out-of-order","lineage_run_id":"run-out-of-order","lineage_checkpoint_id":"trace-ooo-step-1","lineage_immutable":true}`,
+		},
+	}
+	if err := store.WriteBatch(context.Background(), traces); err != nil {
+		t.Fatalf("seed traces: %v", err)
+	}
+
+	configPath := filepath.Join(tempDir, "ongoingai.yaml")
+	configBody := "storage:\n  driver: sqlite\n  path: " + dbPath + "\n"
+	if err := os.WriteFile(configPath, []byte(configBody), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	return configPath, ids
+}
+
+type debugFixtureIDs struct {
+	GroupID     string
+	ThreadID    string
+	RunID       string
+	TraceStep1  string
+	TraceStep2  string
+	UnrelatedID string
+}
+
+func writeDebugPostgresTestFixture(t *testing.T) (string, debugFixtureIDs) {
+	t.Helper()
+
+	dsn := requirePostgresTestDSN(t)
+	idPrefix := postgresTraceTestPrefix("debug")
+	deletePostgresTracesByPrefix(t, dsn, idPrefix)
+	t.Cleanup(func() {
+		deletePostgresTracesByPrefix(t, dsn, idPrefix)
+	})
+
+	store, err := trace.NewPostgresStore(dsn)
+	if err != nil {
+		t.Fatalf("create postgres store: %v", err)
+	}
+	defer func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("close postgres store: %v", err)
+		}
+	}()
+
+	ids := debugFixtureIDs{
+		GroupID:     idPrefix + "group-demo",
+		ThreadID:    idPrefix + "thread-demo",
+		RunID:       idPrefix + "run-demo",
+		TraceStep1:  idPrefix + "trace-step-1",
+		TraceStep2:  idPrefix + "trace-step-2",
+		UnrelatedID: idPrefix + "trace-unrelated",
+	}
+
+	base := time.Unix(0, time.Now().UTC().UnixNano()).UTC().AddDate(75, 0, 0)
+	traces := []*trace.Trace{
+		{
+			ID:               ids.UnrelatedID,
+			Timestamp:        base.Add(-5 * time.Minute),
+			CreatedAt:        base.Add(-5 * time.Minute),
+			TraceGroupID:     idPrefix + "group-other",
+			Provider:         "openai",
+			Model:            "gpt-4o-mini",
+			RequestMethod:    "POST",
+			RequestPath:      "/openai/v1/chat/completions",
+			ResponseStatus:   200,
+			TotalTokens:      9,
+			LatencyMS:        99,
+			EstimatedCostUSD: 0.00009,
+			Metadata: fmt.Sprintf(
+				`{"lineage_group_id":%q,"lineage_thread_id":%q,"lineage_run_id":%q,"lineage_checkpoint_id":%q,"lineage_checkpoint_seq":1,"lineage_immutable":true}`,
+				idPrefix+"group-other",
+				idPrefix+"thread-other",
+				idPrefix+"run-other",
+				ids.UnrelatedID,
+			),
+		},
+		{
+			ID:               ids.TraceStep1,
+			Timestamp:        base,
+			CreatedAt:        base,
+			TraceGroupID:     ids.GroupID,
+			Provider:         "openai",
+			Model:            "gpt-4o-mini",
+			RequestMethod:    "POST",
+			RequestPath:      "/openai/v1/chat/completions",
+			ResponseStatus:   200,
+			InputTokens:      11,
+			OutputTokens:     7,
+			TotalTokens:      18,
+			LatencyMS:        120,
+			EstimatedCostUSD: 0.00018,
+			Metadata: fmt.Sprintf(
+				`{"lineage_group_id":%q,"lineage_thread_id":%q,"lineage_run_id":%q,"lineage_checkpoint_id":%q,"lineage_checkpoint_seq":1,"lineage_immutable":true}`,
+				ids.GroupID,
+				ids.ThreadID,
+				ids.RunID,
+				ids.TraceStep1,
+			),
+		},
+		{
+			ID:               ids.TraceStep2,
+			Timestamp:        base.Add(2 * time.Minute),
+			CreatedAt:        base.Add(2 * time.Minute),
+			TraceGroupID:     ids.GroupID,
+			Provider:         "anthropic",
+			Model:            "claude-sonnet-4-latest",
+			RequestMethod:    "POST",
+			RequestPath:      "/anthropic/v1/messages",
+			ResponseStatus:   200,
+			InputTokens:      13,
+			OutputTokens:     10,
+			TotalTokens:      23,
+			LatencyMS:        180,
+			EstimatedCostUSD: 0.00031,
+			Metadata: fmt.Sprintf(
+				`{"lineage_group_id":%q,"lineage_thread_id":%q,"lineage_run_id":%q,"lineage_checkpoint_id":%q,"lineage_parent_checkpoint_id":%q,"lineage_checkpoint_seq":2,"lineage_immutable":true}`,
+				ids.GroupID,
+				ids.ThreadID,
+				ids.RunID,
+				ids.TraceStep2,
+				ids.TraceStep1,
+			),
+		},
+	}
+	if err := store.WriteBatch(context.Background(), traces); err != nil {
+		t.Fatalf("seed traces: %v", err)
+	}
+
+	tempDir := t.TempDir()
+	configPath := filepath.Join(tempDir, "ongoingai.yaml")
+	configBody := fmt.Sprintf("storage:\n  driver: postgres\n  dsn: %q\n", dsn)
+	if err := os.WriteFile(configPath, []byte(configBody), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	return configPath, ids
 }

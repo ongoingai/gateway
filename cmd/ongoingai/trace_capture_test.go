@@ -102,6 +102,38 @@ func TestBuildTraceRecordParsesStreamingUsageWithCaptureDisabled(t *testing.T) {
 	}
 }
 
+func TestBuildTraceRecordParsesStreamingAnthropicEnvelopeUsageAndModel(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	cfg.Tracing.CaptureBodies = false
+
+	exchange := &proxy.CapturedExchange{
+		Method:       http.MethodPost,
+		Path:         "/anthropic/v1/messages",
+		StatusCode:   http.StatusOK,
+		Streaming:    true,
+		StreamChunks: 3,
+		ResponseBody: []byte(
+			"data: {oops}\n\n" +
+				"data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-latest\",\"usage\":{\"input_tokens\":9}}}\n\n" +
+				"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":6}}\n\n" +
+				"data: [DONE]\n\n",
+		),
+	}
+
+	record := buildTraceRecord(cfg, providers.DefaultRegistry(), exchange)
+	if record.Model != "claude-sonnet-4-latest" {
+		t.Fatalf("model=%q, want claude-sonnet-4-latest", record.Model)
+	}
+	if record.InputTokens != 9 || record.OutputTokens != 6 || record.TotalTokens != 15 {
+		t.Fatalf("usage=%d/%d/%d, want 9/6/15", record.InputTokens, record.OutputTokens, record.TotalTokens)
+	}
+	if record.ResponseBody != "" {
+		t.Fatalf("expected response body not stored when capture disabled")
+	}
+}
+
 func TestBuildTraceRecordBackfillsTTFTUSFromMS(t *testing.T) {
 	t.Parallel()
 
@@ -125,6 +157,51 @@ func TestBuildTraceRecordBackfillsTTFTUSFromMS(t *testing.T) {
 	}
 	if record.TimeToFirstTokenUS != 42000 {
 		t.Fatalf("ttft_us=%d, want 42000", record.TimeToFirstTokenUS)
+	}
+}
+
+func TestExtractUsageFromSSEMergesPartialUsageAcrossMixedPayloadShapes(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(
+		"event: message\ndata: {\"usage\":{\"prompt_tokens\":11}}\n\n" +
+			"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":13}}}\n\n" +
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":5}}\n\n" +
+			"data: [DONE]\n\n",
+	)
+
+	input, output, total := extractUsageFromSSE(body)
+	if input != 13 || output != 5 || total != 18 {
+		t.Fatalf("usage=%d/%d/%d, want 13/5/18", input, output, total)
+	}
+}
+
+func TestExtractUsageFromSSEIgnoresMalformedPayloads(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(
+		"data: {\"usage\":\n\n" +
+			"data: totally-not-json\n\n" +
+			"data: {\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}\n\n",
+	)
+
+	input, output, total := extractUsageFromSSE(body)
+	if input != 2 || output != 1 || total != 3 {
+		t.Fatalf("usage=%d/%d/%d, want 2/1/3", input, output, total)
+	}
+}
+
+func TestExtractModelFromSSESupportsAnthropicMessageEnvelope(t *testing.T) {
+	t.Parallel()
+
+	body := []byte(
+		"data: {bad}\n\n" +
+			"data: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-opus-4-6-20260220\"}}\n\n",
+	)
+
+	model := extractModelFromSSE(body)
+	if model != "claude-opus-4-6-20260220" {
+		t.Fatalf("model=%q, want claude-opus-4-6-20260220", model)
 	}
 }
 
@@ -171,6 +248,32 @@ func TestBuildTraceRecordIncludesGatewayIdentityMetadata(t *testing.T) {
 	}
 	if metadata["workspace_id"] != "workspace-a" {
 		t.Fatalf("workspace_id=%v, want workspace-a", metadata["workspace_id"])
+	}
+}
+
+func TestBuildTraceRecordIncludesCorrelationIDMetadata(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	cfg.Tracing.CaptureBodies = false
+
+	exchange := &proxy.CapturedExchange{
+		Method:         http.MethodPost,
+		Path:           "/openai/v1/chat/completions",
+		StatusCode:     http.StatusOK,
+		CorrelationID:  "corr-trace-1",
+		ResponseBody:   []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`),
+		RequestHeaders: http.Header{"Content-Type": {"application/json"}},
+	}
+
+	record := buildTraceRecord(cfg, providers.DefaultRegistry(), exchange)
+
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(record.Metadata), &metadata); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if metadata["correlation_id"] != "corr-trace-1" {
+		t.Fatalf("correlation_id=%v, want corr-trace-1", metadata["correlation_id"])
 	}
 }
 
