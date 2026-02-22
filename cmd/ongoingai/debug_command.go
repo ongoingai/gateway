@@ -24,15 +24,33 @@ const (
 	defaultDebugFormat = "text"
 	defaultDebugLimit  = 200
 	maxDebugLimit      = 500
+	debugSchemaVersion = "debug-chain.v1"
 )
 
 type debugDocument struct {
+	SchemaVersion   string                `json:"schema_version"`
 	GeneratedAt     time.Time             `json:"generated_at"`
+	Selection       debugSelectionInfo    `json:"selection"`
+	Options         debugOptionInfo       `json:"options"`
 	SourceTraceID   string                `json:"source_trace_id"`
 	SourceTimestamp time.Time             `json:"source_timestamp"`
 	Source          debugTraceCheckpoint  `json:"source"`
 	Chain           debugChain            `json:"chain"`
 	Diffs           []debugCheckpointDiff `json:"diffs,omitempty"`
+}
+
+type debugSelectionInfo struct {
+	TraceID      string `json:"trace_id,omitempty"`
+	TraceGroupID string `json:"trace_group_id,omitempty"`
+	ThreadID     string `json:"thread_id,omitempty"`
+	RunID        string `json:"run_id,omitempty"`
+}
+
+type debugOptionInfo struct {
+	Limit          int  `json:"limit"`
+	IncludeDiff    bool `json:"include_diff"`
+	IncludeHeaders bool `json:"include_headers"`
+	IncludeBodies  bool `json:"include_bodies"`
 }
 
 type debugChain struct {
@@ -371,7 +389,20 @@ func buildDebugDocument(
 	}
 
 	return debugDocument{
-		GeneratedAt:     time.Now().UTC(),
+		SchemaVersion: debugSchemaVersion,
+		GeneratedAt:   time.Now().UTC(),
+		Selection: debugSelectionInfo{
+			TraceID:      selection.TraceID,
+			TraceGroupID: selection.TraceGroupID,
+			ThreadID:     selection.ThreadID,
+			RunID:        selection.RunID,
+		},
+		Options: debugOptionInfo{
+			Limit:          limit,
+			IncludeDiff:    includeDiff,
+			IncludeHeaders: includeHeaders,
+			IncludeBodies:  includeBodies,
+		},
 		SourceTraceID:   strings.TrimSpace(source.ID),
 		SourceTimestamp: debugOrderTime(source),
 		Source:          toDebugTraceCheckpoint(source, 0, includeHeaders, includeBodies),
@@ -849,7 +880,16 @@ func writeDebugText(out io.Writer, document debugDocument, includeHeaders bool, 
 	fmt.Fprintln(out, "OngoingAI Debug Chain")
 
 	meta := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(meta, "Schema version\t%s\n", document.SchemaVersion)
 	fmt.Fprintf(meta, "Generated at\t%s\n", document.GeneratedAt.Format(time.RFC3339))
+	fmt.Fprintf(meta, "Filter trace_id\t%s\n", reportValueOr(document.Selection.TraceID, "(latest)"))
+	fmt.Fprintf(meta, "Filter trace_group_id\t%s\n", reportValueOr(document.Selection.TraceGroupID, "(none)"))
+	fmt.Fprintf(meta, "Filter thread_id\t%s\n", reportValueOr(document.Selection.ThreadID, "(none)"))
+	fmt.Fprintf(meta, "Filter run_id\t%s\n", reportValueOr(document.Selection.RunID, "(none)"))
+	fmt.Fprintf(meta, "Option limit\t%d\n", document.Options.Limit)
+	fmt.Fprintf(meta, "Option include_diff\t%t\n", document.Options.IncludeDiff)
+	fmt.Fprintf(meta, "Option include_headers\t%t\n", document.Options.IncludeHeaders)
+	fmt.Fprintf(meta, "Option include_bodies\t%t\n", document.Options.IncludeBodies)
 	fmt.Fprintf(meta, "Source trace\t%s\n", document.SourceTraceID)
 	fmt.Fprintf(meta, "Source time\t%s\n", document.SourceTimestamp.Format(time.RFC3339))
 	fmt.Fprintf(meta, "Source provider\t%s\n", reportValueOr(document.Source.Provider, "(unknown)"))

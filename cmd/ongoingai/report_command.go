@@ -20,17 +20,19 @@ const (
 	defaultReportFormat = "text"
 	defaultReportLimit  = 10
 	maxReportLimit      = 200
+	reportSchemaVersion = "report.v1"
 )
 
 type reportDocument struct {
-	GeneratedAt time.Time            `json:"generated_at"`
-	Storage     reportStorageInfo    `json:"storage"`
-	Filters     reportFilterInfo     `json:"filters"`
-	Summary     reportSummaryInfo    `json:"summary"`
-	Providers   []reportProviderInfo `json:"providers"`
-	Models      []reportModelInfo    `json:"models"`
-	APIKeys     []reportKeyInfo      `json:"api_keys"`
-	Recent      []reportTraceInfo    `json:"recent_traces"`
+	SchemaVersion string               `json:"schema_version"`
+	GeneratedAt   time.Time            `json:"generated_at"`
+	Storage       reportStorageInfo    `json:"storage"`
+	Filters       reportFilterInfo     `json:"filters"`
+	Summary       reportSummaryInfo    `json:"summary"`
+	Providers     []reportProviderInfo `json:"providers"`
+	Models        []reportModelInfo    `json:"models"`
+	APIKeys       []reportKeyInfo      `json:"api_keys"`
+	Recent        []reportTraceInfo    `json:"recent_traces"`
 }
 
 type reportStorageInfo struct {
@@ -43,6 +45,7 @@ type reportFilterInfo struct {
 	Model    string    `json:"model,omitempty"`
 	From     time.Time `json:"from,omitempty"`
 	To       time.Time `json:"to,omitempty"`
+	Limit    int       `json:"limit"`
 }
 
 type reportSummaryInfo struct {
@@ -325,7 +328,7 @@ func buildReport(
 	modelRows := make([]reportModelInfo, 0, len(models))
 	for _, model := range models {
 		totalRequests += model.RequestCount
-		if model.RequestCount > topModelRequests {
+		if model.RequestCount > topModelRequests || (model.RequestCount == topModelRequests && strings.TrimSpace(model.Model) < strings.TrimSpace(topModel)) {
 			topModelRequests = model.RequestCount
 			topModel = model.Model
 		}
@@ -372,9 +375,13 @@ func buildReport(
 			RequestPath:    item.RequestPath,
 		})
 	}
+	sortReportModelRows(modelRows)
+	sortReportKeyRows(keyRows)
+	sortReportRecentRows(recentRows)
 
 	return reportDocument{
-		GeneratedAt: time.Now().UTC(),
+		SchemaVersion: reportSchemaVersion,
+		GeneratedAt:   time.Now().UTC(),
 		Storage: reportStorageInfo{
 			Driver: cfg.Storage.Driver,
 			Path:   cfg.Storage.Path,
@@ -384,6 +391,7 @@ func buildReport(
 			Model:    analyticsFilter.Model,
 			From:     analyticsFilter.From,
 			To:       analyticsFilter.To,
+			Limit:    traceFilter.Limit,
 		},
 		Summary: reportSummaryInfo{
 			TotalRequests:     totalRequests,
@@ -432,12 +440,51 @@ func aggregateProviderRows(usageSeries []trace.UsagePoint, costSeries []trace.Co
 		rows = append(rows, *item)
 	}
 	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].TotalTokens == rows[j].TotalTokens {
-			return rows[i].Provider < rows[j].Provider
+		if rows[i].TotalTokens != rows[j].TotalTokens {
+			return rows[i].TotalTokens > rows[j].TotalTokens
 		}
-		return rows[i].TotalTokens > rows[j].TotalTokens
+		if rows[i].TotalCostUSD != rows[j].TotalCostUSD {
+			return rows[i].TotalCostUSD > rows[j].TotalCostUSD
+		}
+		return strings.TrimSpace(rows[i].Provider) < strings.TrimSpace(rows[j].Provider)
 	})
 	return rows
+}
+
+func sortReportModelRows(rows []reportModelInfo) {
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].RequestCount != rows[j].RequestCount {
+			return rows[i].RequestCount > rows[j].RequestCount
+		}
+		return strings.TrimSpace(rows[i].Model) < strings.TrimSpace(rows[j].Model)
+	})
+}
+
+func sortReportKeyRows(rows []reportKeyInfo) {
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].RequestCount != rows[j].RequestCount {
+			return rows[i].RequestCount > rows[j].RequestCount
+		}
+		return strings.TrimSpace(rows[i].APIKeyHash) < strings.TrimSpace(rows[j].APIKeyHash)
+	})
+}
+
+func sortReportRecentRows(rows []reportTraceInfo) {
+	sort.Slice(rows, func(i, j int) bool {
+		left := reportRecentTime(rows[i])
+		right := reportRecentTime(rows[j])
+		if !left.Equal(right) {
+			return left.After(right)
+		}
+		return strings.TrimSpace(rows[i].ID) > strings.TrimSpace(rows[j].ID)
+	})
+}
+
+func reportRecentTime(row reportTraceInfo) time.Time {
+	if row.Timestamp.IsZero() {
+		return time.Time{}
+	}
+	return row.Timestamp.UTC()
 }
 
 func writeReport(out io.Writer, format string, report reportDocument) error {
@@ -459,6 +506,7 @@ func writeReportText(out io.Writer, report reportDocument) error {
 	fmt.Fprintln(out, "OngoingAI Report")
 
 	metadataWriter := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(metadataWriter, "Schema version\t%s\n", report.SchemaVersion)
 	fmt.Fprintf(metadataWriter, "Generated at\t%s\n", report.GeneratedAt.Format(time.RFC3339))
 	fmt.Fprintf(metadataWriter, "Storage driver\t%s\n", report.Storage.Driver)
 	if strings.TrimSpace(report.Storage.Path) != "" {
@@ -468,6 +516,7 @@ func writeReportText(out io.Writer, report reportDocument) error {
 	fmt.Fprintf(metadataWriter, "Filter model\t%s\n", reportValueOr(report.Filters.Model, "(all)"))
 	fmt.Fprintf(metadataWriter, "Filter from\t%s\n", reportTimeOr(report.Filters.From, "(all)"))
 	fmt.Fprintf(metadataWriter, "Filter to\t%s\n", reportTimeOr(report.Filters.To, "(all)"))
+	fmt.Fprintf(metadataWriter, "Filter limit\t%d\n", report.Filters.Limit)
 	if err := metadataWriter.Flush(); err != nil {
 		return err
 	}

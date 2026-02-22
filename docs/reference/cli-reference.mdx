@@ -235,6 +235,8 @@ Behavior:
 - Connects directly to SQLite or Postgres trace storage.
 - Queries usage, cost, models, key stats, provider breakdown, and recent traces.
 - Prints a report without requiring the HTTP server.
+- JSON output includes stable `schema_version: "report.v1"` for scripting contracts and echoes selected filters (including `limit`).
+- JSON arrays are deterministic: providers sorted by token volume, models by request count then model name, API keys by request count then hash, and recent traces by timestamp/id.
 
 Exit codes:
 - `0`: Report generated successfully.
@@ -283,6 +285,7 @@ Behavior:
 - Prints ordered chain checkpoints with lineage metadata, tokens, latency, and costs.
 - When `--diff` is enabled, prints redaction-safe deltas (field changes, token/latency deltas, metadata key changes) without exposing raw secret values.
 - When `--bundle-out` is set, exports a support/debug artifact bundle (`debug-chain.json` + `manifest.json`) with file checksums.
+- JSON output includes stable `schema_version: "debug-chain.v1"`, explicit `selection` + `options` blocks, and deterministic checkpoint ordering.
 
 Exit codes:
 - `0`: Debug chain generated successfully.

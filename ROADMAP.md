@@ -20,7 +20,7 @@ This roadmap is organized as priority-ordered phases.
 
 - Phase 0: Completed (15/15)
 - Phase 1: Completed (20/20)
-- Phase 2: Planned (5/16)
+- Phase 2: Planned (6/16)
 
 ## Phase 0: Foundation And Initial Setup (Completed)
 
@@ -102,7 +102,7 @@ Planned work:
 - [x] Add focused trace drill-down CLI commands for direct trace inspection by `trace_id`, `trace_group_id`, `thread_id`, and `run_id`.
 - [x] Add redaction-safe checkpoint diff tooling to compare trace request/response/metadata changes across lineage steps.
 - [x] Add reproducible debug bundle export (`json` + metadata manifest) for support escalation and CI artifact capture.
-- [ ] Add CLI filtering and output controls for scripting (`--format json`, deterministic ordering, stable field contracts).
+- [x] Add CLI filtering and output controls for scripting (`--format json`, deterministic ordering, stable field contracts).
 - [x] Add a local developer diagnostics command (`ongoingai doctor`) to validate config, storage connectivity, route wiring, and auth posture in one pass.
 - [ ] Publish deterministic local demo/test harnesses with mock OpenAI/Anthropic upstreams for repeatable debugging demos.
 - [ ] Add end-to-end tests that assert report/debug outputs against seeded trace fixtures for SQLite and Postgres.

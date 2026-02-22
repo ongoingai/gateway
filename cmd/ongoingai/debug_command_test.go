@@ -56,8 +56,20 @@ func TestRunDebugByTraceIDJSON(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("decode debug json: %v\nbody=%s", err, stdout.String())
 	}
+	if payload.SchemaVersion != debugSchemaVersion {
+		t.Fatalf("schema_version=%q, want %q", payload.SchemaVersion, debugSchemaVersion)
+	}
 	if payload.SourceTraceID != "trace-step-1" {
 		t.Fatalf("source_trace_id=%q, want trace-step-1", payload.SourceTraceID)
+	}
+	if payload.Selection.TraceID != "trace-step-1" {
+		t.Fatalf("selection.trace_id=%q, want trace-step-1", payload.Selection.TraceID)
+	}
+	if payload.Options.Limit != 10 {
+		t.Fatalf("options.limit=%d, want 10", payload.Options.Limit)
+	}
+	if payload.Options.IncludeDiff || payload.Options.IncludeHeaders || payload.Options.IncludeBodies {
+		t.Fatalf("options=%+v, want diff/headers/bodies false", payload.Options)
 	}
 	if payload.Chain.CheckpointCount != 2 {
 		t.Fatalf("checkpoint_count=%d, want 2", payload.Chain.CheckpointCount)
@@ -94,6 +106,9 @@ func TestRunDebugByTraceGroupIDJSON(t *testing.T) {
 	}
 	if payload.Chain.LineageIdentifier != "trace_group_id" {
 		t.Fatalf("lineage_identifier=%q, want trace_group_id", payload.Chain.LineageIdentifier)
+	}
+	if payload.Selection.TraceGroupID != "group-demo" {
+		t.Fatalf("selection.trace_group_id=%q, want group-demo", payload.Selection.TraceGroupID)
 	}
 	if payload.Chain.GroupID != "group-demo" {
 		t.Fatalf("group_id=%q, want group-demo", payload.Chain.GroupID)
