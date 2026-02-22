@@ -238,23 +238,9 @@ func writeTracePipelineDiagnosticsText(out io.Writer, document tracePipelineDiag
 	fmt.Fprintf(drops, "Enqueue dropped total\t%d\n", document.Diagnostics.EnqueueDroppedTotal)
 	fmt.Fprintf(drops, "Write dropped total\t%d\n", document.Diagnostics.WriteDroppedTotal)
 	fmt.Fprintf(drops, "Total dropped\t%d\n", document.Diagnostics.TotalDroppedTotal)
-	fmt.Fprintf(drops, "Last enqueue drop at\t%s\n", diagnosticsTimePtrOr(document.Diagnostics.LastEnqueueDropAt, "(none)"))
-	fmt.Fprintf(drops, "Last write drop at\t%s\n", diagnosticsTimePtrOr(document.Diagnostics.LastWriteDropAt, "(none)"))
-	fmt.Fprintf(drops, "Last write drop operation\t%s\n", diagnosticsValueOr(document.Diagnostics.LastWriteDropOperation, "(none)"))
+	fmt.Fprintf(drops, "Last enqueue drop at\t%s\n", timePtrOr(document.Diagnostics.LastEnqueueDropAt, "(none)"))
+	fmt.Fprintf(drops, "Last write drop at\t%s\n", timePtrOr(document.Diagnostics.LastWriteDropAt, "(none)"))
+	fmt.Fprintf(drops, "Last write drop operation\t%s\n", valueOr(document.Diagnostics.LastWriteDropOperation, "(none)"))
 	return drops.Flush()
 }
 
-func diagnosticsTimePtrOr(value *time.Time, fallback string) string {
-	if value == nil {
-		return fallback
-	}
-	return value.UTC().Format(time.RFC3339)
-}
-
-func diagnosticsValueOr(value, fallback string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return fallback
-	}
-	return value
-}

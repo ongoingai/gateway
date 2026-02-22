@@ -1,9 +1,7 @@
 package trace
 
 import (
-	"encoding/json"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -24,17 +22,17 @@ func SortLineageTraces(items []*Trace) {
 			index:     i,
 			item:      item,
 			traceID:   lineageTraceID(item),
-			orderTime: lineageOrderTime(item),
+			orderTime: OrderTime(item),
 		}
 		if item != nil {
-			meta := decodeLineageSortMetadata(item.Metadata)
-			node.checkpointID = strings.TrimSpace(meta.CheckpointID)
+			payload := DecodeMetadataMap(item.Metadata)
+			node.checkpointID = strings.TrimSpace(MetadataString(payload, "lineage_checkpoint_id"))
 			if node.checkpointID == "" {
 				node.checkpointID = node.traceID
 			}
-			node.parentCheckpointID = strings.TrimSpace(meta.ParentCheckpointID)
-			if meta.CheckpointSeq > 0 {
-				node.resolvedSeq = meta.CheckpointSeq
+			node.parentCheckpointID = strings.TrimSpace(MetadataString(payload, "lineage_parent_checkpoint_id"))
+			if seq, ok := MetadataInt64(payload, "lineage_checkpoint_seq"); ok && seq > 0 {
+				node.resolvedSeq = seq
 				node.hasResolvedSeq = true
 			}
 		}
@@ -123,12 +121,6 @@ type lineageSortNode struct {
 	indegree           int
 }
 
-type lineageSortMetadata struct {
-	CheckpointID       string
-	ParentCheckpointID string
-	CheckpointSeq      int64
-}
-
 func resolveLineageCheckpointSeq(nodes []lineageSortNode, checkpointIndex map[string]int, children [][]int) {
 	if len(nodes) == 0 {
 		return
@@ -215,82 +207,9 @@ func lineageNodeLess(nodes []lineageSortNode, left, right int) bool {
 	return a.index < b.index
 }
 
-func lineageOrderTime(item *Trace) time.Time {
-	if item == nil {
-		return time.Time{}
-	}
-	if !item.CreatedAt.IsZero() {
-		return item.CreatedAt.UTC()
-	}
-	return item.Timestamp.UTC()
-}
-
 func lineageTraceID(item *Trace) string {
 	if item == nil {
 		return ""
 	}
 	return strings.TrimSpace(item.ID)
-}
-
-func decodeLineageSortMetadata(raw string) lineageSortMetadata {
-	if strings.TrimSpace(raw) == "" {
-		return lineageSortMetadata{}
-	}
-	payload := make(map[string]any)
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return lineageSortMetadata{}
-	}
-
-	result := lineageSortMetadata{
-		CheckpointID:       lineageSortString(payload, "lineage_checkpoint_id"),
-		ParentCheckpointID: lineageSortString(payload, "lineage_parent_checkpoint_id"),
-	}
-	if seq, ok := lineageSortInt64(payload["lineage_checkpoint_seq"]); ok && seq > 0 {
-		result.CheckpointSeq = seq
-	}
-	return result
-}
-
-func lineageSortString(payload map[string]any, key string) string {
-	if len(payload) == 0 {
-		return ""
-	}
-	value, ok := payload[key]
-	if !ok {
-		return ""
-	}
-	text, ok := value.(string)
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(text)
-}
-
-func lineageSortInt64(value any) (int64, bool) {
-	switch typed := value.(type) {
-	case float64:
-		return int64(typed), true
-	case float32:
-		return int64(typed), true
-	case int:
-		return int64(typed), true
-	case int64:
-		return typed, true
-	case int32:
-		return int64(typed), true
-	case json.Number:
-		parsed, err := typed.Int64()
-		if err != nil {
-			return 0, false
-		}
-		return parsed, true
-	case string:
-		parsed, err := strconv.ParseInt(strings.TrimSpace(typed), 10, 64)
-		if err != nil {
-			return 0, false
-		}
-		return parsed, true
-	default:
-		return 0, false
-	}
 }

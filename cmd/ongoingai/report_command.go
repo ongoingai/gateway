@@ -492,10 +492,10 @@ func writeReportText(out io.Writer, report reportDocument) error {
 	if strings.TrimSpace(report.Storage.Path) != "" {
 		fmt.Fprintf(metadataWriter, "Storage path\t%s\n", report.Storage.Path)
 	}
-	fmt.Fprintf(metadataWriter, "Filter provider\t%s\n", reportValueOr(report.Filters.Provider, "(all)"))
-	fmt.Fprintf(metadataWriter, "Filter model\t%s\n", reportValueOr(report.Filters.Model, "(all)"))
-	fmt.Fprintf(metadataWriter, "Filter from\t%s\n", reportTimePtrOr(report.Filters.From, "(all)"))
-	fmt.Fprintf(metadataWriter, "Filter to\t%s\n", reportTimePtrOr(report.Filters.To, "(all)"))
+	fmt.Fprintf(metadataWriter, "Filter provider\t%s\n", valueOr(report.Filters.Provider, "(all)"))
+	fmt.Fprintf(metadataWriter, "Filter model\t%s\n", valueOr(report.Filters.Model, "(all)"))
+	fmt.Fprintf(metadataWriter, "Filter from\t%s\n", timePtrOr(report.Filters.From, "(all)"))
+	fmt.Fprintf(metadataWriter, "Filter to\t%s\n", timePtrOr(report.Filters.To, "(all)"))
 	fmt.Fprintf(metadataWriter, "Filter limit\t%d\n", report.Filters.Limit)
 	if err := metadataWriter.Flush(); err != nil {
 		return err
@@ -509,7 +509,7 @@ func writeReportText(out io.Writer, report reportDocument) error {
 	fmt.Fprintf(summaryWriter, "Total tokens\t%d\n", report.Summary.TotalTokens)
 	fmt.Fprintf(summaryWriter, "Estimated cost (USD)\t%.6f\n", report.Summary.TotalCostUSD)
 	fmt.Fprintf(summaryWriter, "Active API keys\t%d\n", report.Summary.ActiveKeys)
-	fmt.Fprintf(summaryWriter, "Top model\t%s\n", reportValueOr(report.Summary.TopModel, "(none)"))
+	fmt.Fprintf(summaryWriter, "Top model\t%s\n", valueOr(report.Summary.TopModel, "(none)"))
 	if err := summaryWriter.Flush(); err != nil {
 		return err
 	}
@@ -535,7 +535,7 @@ func writeReportText(out io.Writer, report reportDocument) error {
 		modelWriter := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(modelWriter, "MODEL\tREQUESTS\tTOTAL_TOKENS\tTOTAL_COST_USD\tAVG_LATENCY_MS\tAVG_TTFT_MS")
 		for _, row := range report.Models {
-			fmt.Fprintf(modelWriter, "%s\t%d\t%d\t%.6f\t%.2f\t%.2f\n", reportValueOr(row.Model, "(unknown)"), row.RequestCount, row.TotalTokens, row.TotalCostUSD, row.AvgLatencyMS, row.AvgTTFTMS)
+			fmt.Fprintf(modelWriter, "%s\t%d\t%d\t%.6f\t%.2f\t%.2f\n", valueOr(row.Model, "(unknown)"), row.RequestCount, row.TotalTokens, row.TotalCostUSD, row.AvgLatencyMS, row.AvgTTFTMS)
 		}
 		if err := modelWriter.Flush(); err != nil {
 			return err
@@ -556,7 +556,7 @@ func writeReportText(out io.Writer, report reportDocument) error {
 				row.RequestCount,
 				row.TotalTokens,
 				row.TotalCostUSD,
-				reportTimeOr(row.LastActiveAt, "(none)"),
+				timeOr(row.LastActiveAt, "(none)"),
 			)
 		}
 		if err := keyWriter.Flush(); err != nil {
@@ -575,33 +575,18 @@ func writeReportText(out io.Writer, report reportDocument) error {
 		fmt.Fprintf(
 			traceWriter,
 			"%s\t%s\t%s\t%d\t%d\t%.6f\t%d\t%s\t%s\n",
-			reportTimeOr(row.Timestamp, "(unknown)"),
-			reportValueOr(row.Provider, "(unknown)"),
-			reportValueOr(row.Model, "(unknown)"),
+			timeOr(row.Timestamp, "(unknown)"),
+			valueOr(row.Provider, "(unknown)"),
+			valueOr(row.Model, "(unknown)"),
 			row.ResponseStatus,
 			row.TotalTokens,
 			row.EstimatedCost,
 			row.LatencyMS,
-			reportValueOr(row.RequestPath, "(unknown)"),
+			valueOr(row.RequestPath, "(unknown)"),
 			row.ID,
 		)
 	}
 	return traceWriter.Flush()
-}
-
-func reportValueOr(value string, fallback string) string {
-	trimmed := strings.TrimSpace(value)
-	if trimmed == "" {
-		return fallback
-	}
-	return trimmed
-}
-
-func reportTimeOr(value time.Time, fallback string) string {
-	if value.IsZero() {
-		return fallback
-	}
-	return value.UTC().Format(time.RFC3339)
 }
 
 func reportOptionalTime(value time.Time) *time.Time {
@@ -612,9 +597,3 @@ func reportOptionalTime(value time.Time) *time.Time {
 	return &utc
 }
 
-func reportTimePtrOr(value *time.Time, fallback string) string {
-	if value == nil || value.IsZero() {
-		return fallback
-	}
-	return value.UTC().Format(time.RFC3339)
-}

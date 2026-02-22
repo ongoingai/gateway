@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/ongoingai/gateway/internal/config"
 )
@@ -36,4 +37,29 @@ func loadAndValidateConfig(configPath string) (config.Config, string, error) {
 		return config.Config{}, configStageValidate, err
 	}
 	return cfg, "", nil
+}
+
+// valueOr returns the trimmed value if non-empty, otherwise the fallback.
+func valueOr(value, fallback string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return fallback
+	}
+	return trimmed
+}
+
+// timeOr formats a time as RFC3339 UTC, or returns the fallback if zero.
+func timeOr(value time.Time, fallback string) string {
+	if value.IsZero() {
+		return fallback
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
+// timePtrOr formats a *time.Time as RFC3339 UTC, or returns the fallback if nil/zero.
+func timePtrOr(value *time.Time, fallback string) string {
+	if value == nil || value.IsZero() {
+		return fallback
+	}
+	return value.UTC().Format(time.RFC3339)
 }
