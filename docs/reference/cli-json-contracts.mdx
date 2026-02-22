@@ -211,7 +211,11 @@ Top-level object:
 
 Ordering guarantees:
 
-- `chain.checkpoints`: ordered by `created_at` (fallback `timestamp`) ascending, then checkpoint id ascending.
+- `chain.checkpoints`: lineage-aware deterministic order.
+- Ordering preference:
+  - `lineage.checkpoint_seq` ascending when available.
+  - parent/child linkage (`lineage.parent_checkpoint_id`) when sequence is partial.
+  - fallback `created_at` (then `timestamp`) ascending, then checkpoint id ascending.
 - `diffs`: ordered to match adjacent checkpoint edges in `chain.checkpoints`.
 
 ## Parsing tips

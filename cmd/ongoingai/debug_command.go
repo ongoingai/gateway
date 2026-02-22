@@ -676,14 +676,7 @@ func queryDebugChainItems(ctx context.Context, store trace.TraceStore, filter tr
 }
 
 func sortDebugItems(items []*trace.Trace) {
-	sort.SliceStable(items, func(i, j int) bool {
-		left := debugOrderTime(items[i])
-		right := debugOrderTime(items[j])
-		if left.Equal(right) {
-			return strings.TrimSpace(items[i].ID) < strings.TrimSpace(items[j].ID)
-		}
-		return left.Before(right)
-	})
+	trace.SortLineageTraces(items)
 }
 
 func debugOrderTime(item *trace.Trace) time.Time {

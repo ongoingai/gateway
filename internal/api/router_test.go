@@ -495,6 +495,119 @@ func TestRouterTraceReplayReturnsCheckpointHistory(t *testing.T) {
 	}
 }
 
+func TestRouterTraceReplayReconstructsOutOfOrderLineage(t *testing.T) {
+	t.Parallel()
+
+	base := time.Date(2026, 2, 14, 3, 0, 0, 0, time.UTC)
+	store := &stubStore{
+		getByID: map[string]*trace.Trace{
+			"trace-3": {
+				ID:             "trace-3",
+				TraceGroupID:   "group-1",
+				OrgID:          "org-a",
+				WorkspaceID:    "workspace-a",
+				Timestamp:      base,
+				Provider:       "anthropic",
+				Model:          "claude-sonnet-4-latest",
+				RequestMethod:  "POST",
+				RequestPath:    "/anthropic/v1/messages",
+				ResponseStatus: 200,
+				TotalTokens:    36,
+				LatencyMS:      190,
+				Metadata:       `{"lineage_group_id":"group-1","lineage_thread_id":"thread-1","lineage_run_id":"run-1","lineage_checkpoint_id":"trace-3","lineage_parent_checkpoint_id":"trace-2","lineage_immutable":true}`,
+				CreatedAt:      base,
+			},
+		},
+		queryResult: &trace.TraceResult{
+			Items: []*trace.Trace{
+				{
+					ID:             "trace-3",
+					TraceGroupID:   "group-1",
+					OrgID:          "org-a",
+					WorkspaceID:    "workspace-a",
+					Timestamp:      base,
+					Provider:       "anthropic",
+					Model:          "claude-sonnet-4-latest",
+					RequestMethod:  "POST",
+					RequestPath:    "/anthropic/v1/messages",
+					ResponseStatus: 200,
+					TotalTokens:    36,
+					LatencyMS:      190,
+					Metadata:       `{"lineage_group_id":"group-1","lineage_thread_id":"thread-1","lineage_run_id":"run-1","lineage_checkpoint_id":"trace-3","lineage_parent_checkpoint_id":"trace-2","lineage_immutable":true}`,
+					CreatedAt:      base,
+				},
+				{
+					ID:             "trace-1",
+					TraceGroupID:   "group-1",
+					OrgID:          "org-a",
+					WorkspaceID:    "workspace-a",
+					Timestamp:      base.Add(4 * time.Minute),
+					Provider:       "openai",
+					Model:          "gpt-4o-mini",
+					RequestMethod:  "POST",
+					RequestPath:    "/openai/v1/chat/completions",
+					ResponseStatus: 200,
+					TotalTokens:    14,
+					LatencyMS:      120,
+					Metadata:       `{"lineage_group_id":"group-1","lineage_thread_id":"thread-1","lineage_run_id":"run-1","lineage_checkpoint_id":"trace-1","lineage_immutable":true}`,
+					CreatedAt:      base.Add(4 * time.Minute),
+				},
+				{
+					ID:             "trace-2",
+					TraceGroupID:   "group-1",
+					OrgID:          "org-a",
+					WorkspaceID:    "workspace-a",
+					Timestamp:      base.Add(5 * time.Minute),
+					Provider:       "openai",
+					Model:          "gpt-4o",
+					RequestMethod:  "POST",
+					RequestPath:    "/openai/v1/chat/completions",
+					ResponseStatus: 200,
+					TotalTokens:    22,
+					LatencyMS:      150,
+					Metadata:       `{"lineage_group_id":"group-1","lineage_thread_id":"thread-1","lineage_run_id":"run-1","lineage_checkpoint_id":"trace-2","lineage_parent_checkpoint_id":"trace-1","lineage_checkpoint_seq":2,"lineage_immutable":true}`,
+					CreatedAt:      base.Add(5 * time.Minute),
+				},
+			},
+		},
+	}
+
+	handler := NewRouter(RouterOptions{
+		AppVersion: "dev",
+		Store:      store,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/traces/trace-3/replay?checkpoint_id=trace-3", nil)
+	req = req.WithContext(auth.WithIdentity(req.Context(), &auth.Identity{
+		OrgID:       "org-a",
+		WorkspaceID: "workspace-a",
+	}))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("replay status=%d, want 200", rec.Code)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode replay response: %v", err)
+	}
+	if body["source_trace_id"] != "trace-3" || body["target_checkpoint_id"] != "trace-3" {
+		t.Fatalf("unexpected replay ids=%v", body)
+	}
+	checkpoints, ok := body["checkpoints"].([]any)
+	if !ok || len(checkpoints) != 3 {
+		t.Fatalf("replay checkpoints=%v, want three checkpoints", body["checkpoints"])
+	}
+	first, _ := checkpoints[0].(map[string]any)
+	second, _ := checkpoints[1].(map[string]any)
+	third, _ := checkpoints[2].(map[string]any)
+	if first["id"] != "trace-1" || second["id"] != "trace-2" || third["id"] != "trace-3" {
+		t.Fatalf("replay checkpoint order=%v", checkpoints)
+	}
+}
+
 func TestRouterTraceForkReturnsLineageHeaders(t *testing.T) {
 	t.Parallel()
 
