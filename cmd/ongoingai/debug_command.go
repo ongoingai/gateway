@@ -247,8 +247,8 @@ func buildDebugDocument(
 			IncludeBodies:  includeBodies,
 		},
 		SourceTraceID:   strings.TrimSpace(source.ID),
-		SourceTimestamp:  trace.OrderTime(source),
-		Source:           toDebugTraceCheckpoint(source, 0, includeHeaders, includeBodies),
+		SourceTimestamp: trace.OrderTime(source),
+		Source:          toDebugTraceCheckpoint(source, 0, includeHeaders, includeBodies),
 		Chain: debugChain{
 			GroupID:           chainGroupID,
 			ThreadID:          chainThreadID,

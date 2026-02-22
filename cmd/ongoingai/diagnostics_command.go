@@ -243,4 +243,3 @@ func writeTracePipelineDiagnosticsText(out io.Writer, document tracePipelineDiag
 	fmt.Fprintf(drops, "Last write drop operation\t%s\n", valueOr(document.Diagnostics.LastWriteDropOperation, "(none)"))
 	return drops.Flush()
 }
-

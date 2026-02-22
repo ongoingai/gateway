@@ -596,4 +596,3 @@ func reportOptionalTime(value time.Time) *time.Time {
 	utc := value.UTC()
 	return &utc
 }
-
