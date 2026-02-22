@@ -335,7 +335,7 @@ func writeReportPostgresTestFixture(t *testing.T) (string, reportFixtureIDs, tim
 		}
 	}()
 
-	base := time.Unix(0, time.Now().UTC().UnixNano()).UTC().AddDate(75, 0, 0)
+	base := time.Unix(0, time.Now().UTC().UnixNano()).UTC().AddDate(75, 6, 0)
 	ids := reportFixtureIDs{
 		TraceOpenAI:     idPrefix + "trace-openai",
 		TraceAnthropic1: idPrefix + "trace-anthropic-1",
