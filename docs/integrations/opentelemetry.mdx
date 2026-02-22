@@ -181,6 +181,8 @@ Counts trace records dropped after a storage write failure.
 | Attribute | Description |
 | --- | --- |
 | `operation` | Write operation that failed, such as `write_trace` or `write_batch_fallback`. |
+| `error_class` | Classified failure type: `connection`, `timeout`, `contention`, `constraint`, or `unknown`. |
+| `store` | Trace storage backend, such as `sqlite` or `postgres`. |
 
 Both counters help you detect trace pipeline backpressure and storage issues
 before they affect audit completeness. A sustained increase in either counter

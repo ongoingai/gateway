@@ -254,6 +254,8 @@ Top-level object:
 | `last_enqueue_drop_at` | string (RFC3339) | no | Present after at least one queue-full drop. |
 | `last_write_drop_at` | string (RFC3339) | no | Present after at least one write-drop event. |
 | `last_write_drop_operation` | string | no | Last write operation label that dropped traces. |
+| `write_failures_by_class` | object | no | Per-class write failure counts; includes only non-zero classes (`connection`, `timeout`, `contention`, `constraint`, `unknown`). |
+| `store_driver` | string | no | Storage driver backing the trace pipeline (for example `sqlite` or `postgres`). |
 
 ## Parsing tips
 

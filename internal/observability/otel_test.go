@@ -16,6 +16,8 @@ import (
 	"github.com/ongoingai/gateway/internal/correlation"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -265,6 +267,80 @@ func TestSpanEnrichmentMiddleware(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRecordTraceWriteFailureIncludesMetricAttributes(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	counter, err := meterProvider.Meter("test").Int64Counter("test.trace.write_failed_total")
+	if err != nil {
+		t.Fatalf("Int64Counter() error: %v", err)
+	}
+
+	runtime := &Runtime{
+		enabled:                 true,
+		traceWriteFailedCounter: counter,
+	}
+
+	runtime.RecordTraceWriteFailure("write_batch_fallback", 3, "timeout", "postgres")
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	found := false
+	var dataPoint metricdata.DataPoint[int64]
+	for _, scope := range metrics.ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			if metric.Name != "test.trace.write_failed_total" {
+				continue
+			}
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric data type=%T, want metricdata.Sum[int64]", metric.Data)
+			}
+			if len(sum.DataPoints) != 1 {
+				t.Fatalf("datapoints=%d, want 1", len(sum.DataPoints))
+			}
+			dataPoint = sum.DataPoints[0]
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing test.trace.write_failed_total metric")
+	}
+	if dataPoint.Value != 3 {
+		t.Fatalf("value=%d, want 3", dataPoint.Value)
+	}
+
+	gotAttrs := make(map[string]string)
+	for _, kv := range dataPoint.Attributes.ToSlice() {
+		gotAttrs[string(kv.Key)] = kv.Value.AsString()
+	}
+	wantAttrs := map[string]string{
+		"operation":   "write_batch_fallback",
+		"error_class": "timeout",
+		"store":       "postgres",
+	}
+	for key, want := range wantAttrs {
+		if got := gotAttrs[key]; got != want {
+			t.Fatalf("attribute %q=%q, want %q", key, got, want)
+		}
+	}
+	for key, value := range gotAttrs {
+		if _, ok := wantAttrs[key]; !ok {
+			t.Fatalf("unexpected attribute %q=%q", key, value)
+		}
 	}
 }
 
