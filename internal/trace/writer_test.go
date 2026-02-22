@@ -162,6 +162,18 @@ func (s *contextAwareBlockingStore) WriteBatch(ctx context.Context, traces []*Tr
 	return ctx.Err()
 }
 
+type alwaysFailStore struct {
+	testStore
+}
+
+func (s *alwaysFailStore) WriteTrace(_ context.Context, _ *Trace) error {
+	return errors.New("always fail")
+}
+
+func (s *alwaysFailStore) WriteBatch(_ context.Context, _ []*Trace) error {
+	return errors.New("always fail")
+}
+
 var errFlakyWrite = errors.New("flaky write")
 
 type flakyStore struct {
@@ -746,5 +758,91 @@ func TestWriterStopIsIdempotentWithoutStart(t *testing.T) {
 
 	if writer.Enqueue(&Trace{ID: "after-stop"}) {
 		t.Fatal("enqueue should fail after stop")
+	}
+}
+
+func TestWriterQueueCap(t *testing.T) {
+	t.Parallel()
+
+	writer := NewWriter(&testStore{}, 16)
+	if got := writer.QueueCap(); got != 16 {
+		t.Fatalf("QueueCap()=%d, want 16", got)
+	}
+}
+
+func TestWriterMetricsOnWriteSuccessCalledOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	store := &testStore{}
+	writer := NewWriter(store, 8)
+
+	var successCount int64
+	writer.SetMetrics(&WriterMetrics{
+		OnWriteSuccess: func(count int) { atomic.AddInt64(&successCount, int64(count)) },
+	})
+
+	writer.Start(context.Background())
+	for i := 0; i < 5; i++ {
+		if !writer.Enqueue(&Trace{ID: "trace"}) {
+			t.Fatalf("enqueue failed at index %d", i)
+		}
+	}
+	writer.Stop()
+
+	if got := atomic.LoadInt64(&successCount); got != 5 {
+		t.Fatalf("OnWriteSuccess total=%d, want 5", got)
+	}
+}
+
+func TestWriterMetricsOnWriteSuccessNotCalledOnFailure(t *testing.T) {
+	t.Parallel()
+
+	store := &alwaysFailStore{}
+	writer := NewWriter(store, 8)
+
+	var successCount int64
+	writer.SetMetrics(&WriterMetrics{
+		OnWriteSuccess: func(count int) { atomic.AddInt64(&successCount, int64(count)) },
+	})
+
+	writer.Start(context.Background())
+	for i := 0; i < 3; i++ {
+		writer.Enqueue(&Trace{ID: "trace"})
+	}
+	writer.Stop()
+
+	if got := atomic.LoadInt64(&successCount); got != 0 {
+		t.Fatalf("OnWriteSuccess total=%d, want 0", got)
+	}
+}
+
+func TestWriterMetricsOnWriteSuccessPartialBatchFallback(t *testing.T) {
+	t.Parallel()
+
+	// flakyStore: WriteBatch always fails, WriteTrace fails for the first failFirst items.
+	store := &flakyStore{failFirst: 1}
+	writer := NewWriter(store, 8)
+
+	var successCount int64
+	writer.SetMetrics(&WriterMetrics{
+		OnWriteSuccess: func(count int) { atomic.AddInt64(&successCount, int64(count)) },
+	})
+
+	writer.Start(context.Background())
+	for i := 0; i < 4; i++ {
+		if !writer.Enqueue(&Trace{ID: "trace"}) {
+			t.Fatalf("enqueue failed at index %d", i)
+		}
+	}
+	writer.Stop()
+
+	// The first item fails individual write, remaining 3 succeed.
+	// Exact count depends on batching; at minimum some succeed and the failed ones don't count.
+	got := atomic.LoadInt64(&successCount)
+	if got <= 0 {
+		t.Fatalf("OnWriteSuccess total=%d, want >0", got)
+	}
+	if got > 4 {
+		t.Fatalf("OnWriteSuccess total=%d, want <=4", got)
 	}
 }

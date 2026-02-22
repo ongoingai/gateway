@@ -67,6 +67,9 @@ type WriterMetrics struct {
 	// OnWriteStart is called before each storage write. It returns an end
 	// function that the writer calls after the write completes (with error or nil).
 	OnWriteStart func(batchSize int) func(error)
+	// OnWriteSuccess is called after traces are successfully persisted to storage.
+	// The count parameter indicates how many traces were written.
+	OnWriteSuccess func(count int)
 }
 
 type Writer struct {
@@ -149,6 +152,14 @@ func (w *Writer) QueueLen() int {
 		return 0
 	}
 	return len(w.queue)
+}
+
+// QueueCap returns the capacity of the write queue.
+func (w *Writer) QueueCap() int {
+	if w == nil {
+		return 0
+	}
+	return cap(w.queue)
 }
 
 func (w *Writer) Start(ctx context.Context) {
@@ -452,6 +463,10 @@ func (w *Writer) flushBatch(ctx context.Context, batch []*Trace) {
 				FailedCount: 1,
 				Err:         err,
 			})
+		} else {
+			if m := w.loadMetrics(); m != nil && m.OnWriteSuccess != nil {
+				m.OnWriteSuccess(1)
+			}
 		}
 		return
 	}
@@ -474,6 +489,15 @@ func (w *Writer) flushBatch(ctx context.Context, batch []*Trace) {
 				FailedCount: failedWrites,
 				Err:         errors.Join(err, fallbackErr),
 			})
+		}
+		if succeeded := len(batch) - failedWrites; succeeded > 0 {
+			if m := w.loadMetrics(); m != nil && m.OnWriteSuccess != nil {
+				m.OnWriteSuccess(succeeded)
+			}
+		}
+	} else {
+		if m := w.loadMetrics(); m != nil && m.OnWriteSuccess != nil {
+			m.OnWriteSuccess(len(batch))
 		}
 	}
 }

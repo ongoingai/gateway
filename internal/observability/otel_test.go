@@ -645,9 +645,12 @@ func TestRuntimeGuardsDoNotPanic(t *testing.T) {
 			tt.runtime.RecordTraceQueueDrop("/openai/v1/chat", 502)
 			tt.runtime.RecordTraceWriteFailure("write_trace", 5, "unknown", "sqlite")
 			tt.runtime.RecordTraceEnqueued()
+			tt.runtime.RecordTraceWritten(3)
 			tt.runtime.RecordTraceFlush(10, 50*time.Millisecond)
 			tt.runtime.RecordProviderRequest("openai", "gpt-4o", 200, 1000)
+			tt.runtime.RecordProxyRequest("openai", "org-1", "ws-1", "/openai/v1/chat", 200, 1000)
 			tt.runtime.RegisterTraceQueueDepthGauge(func() int { return 0 })
+			tt.runtime.RegisterTraceQueueCapacityGauge(func() int { return 256 })
 
 			if err := tt.runtime.Shutdown(context.Background()); err != nil {
 				t.Fatalf("Shutdown() error: %v", err)
@@ -1103,6 +1106,227 @@ func TestMakeWriteSpanHookRecordsErrorSpan(t *testing.T) {
 	}
 }
 
+func TestRecordTraceWrittenIncrementsCounter(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	counter, err := meterProvider.Meter("test").Int64Counter("test.trace.written_total")
+	if err != nil {
+		t.Fatalf("Int64Counter() error: %v", err)
+	}
+
+	runtime := &Runtime{
+		enabled:             true,
+		traceWrittenCounter: counter,
+	}
+
+	runtime.RecordTraceWritten(3)
+	runtime.RecordTraceWritten(2)
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	found := false
+	for _, scope := range metrics.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "test.trace.written_total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric data type=%T, want metricdata.Sum[int64]", m.Data)
+			}
+			if len(sum.DataPoints) != 1 {
+				t.Fatalf("datapoints=%d, want 1", len(sum.DataPoints))
+			}
+			if sum.DataPoints[0].Value != 5 {
+				t.Fatalf("value=%d, want 5", sum.DataPoints[0].Value)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing test.trace.written_total metric")
+	}
+}
+
+func TestRecordProxyRequestIncludesMetricAttributes(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	meter := meterProvider.Meter("test")
+	counter, err := meter.Int64Counter("test.proxy.request_total")
+	if err != nil {
+		t.Fatalf("Int64Counter() error: %v", err)
+	}
+	histogram, err := meter.Float64Histogram("test.proxy.request_duration_seconds")
+	if err != nil {
+		t.Fatalf("Float64Histogram() error: %v", err)
+	}
+
+	runtime := &Runtime{
+		enabled:                       true,
+		proxyRequestCounter:           counter,
+		proxyRequestDurationHistogram: histogram,
+	}
+
+	runtime.RecordProxyRequest("openai", "org-test", "ws-test", "/openai/v1/chat/completions", 200, 850)
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	var counterFound, histogramFound bool
+	for _, scope := range metrics.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			switch m.Name {
+			case "test.proxy.request_total":
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("counter data type=%T, want metricdata.Sum[int64]", m.Data)
+				}
+				if len(sum.DataPoints) != 1 {
+					t.Fatalf("counter datapoints=%d, want 1", len(sum.DataPoints))
+				}
+				dp := sum.DataPoints[0]
+				if dp.Value != 1 {
+					t.Fatalf("counter value=%d, want 1", dp.Value)
+				}
+				gotAttrs := make(map[string]string)
+				for _, kv := range dp.Attributes.ToSlice() {
+					gotAttrs[string(kv.Key)] = kv.Value.Emit()
+				}
+				wantAttrs := map[string]string{
+					"provider":     "openai",
+					"org_id":       "org-test",
+					"workspace_id": "ws-test",
+					"route":        "/openai/*",
+					"status_code":  "200",
+				}
+				for key, want := range wantAttrs {
+					if got := gotAttrs[key]; got != want {
+						t.Fatalf("counter attribute %q=%q, want %q", key, got, want)
+					}
+				}
+				for key, value := range gotAttrs {
+					if _, ok := wantAttrs[key]; !ok {
+						t.Fatalf("unexpected counter attribute %q=%q", key, value)
+					}
+				}
+				counterFound = true
+
+			case "test.proxy.request_duration_seconds":
+				hist, ok := m.Data.(metricdata.Histogram[float64])
+				if !ok {
+					t.Fatalf("histogram data type=%T, want metricdata.Histogram[float64]", m.Data)
+				}
+				if len(hist.DataPoints) != 1 {
+					t.Fatalf("histogram datapoints=%d, want 1", len(hist.DataPoints))
+				}
+				dp := hist.DataPoints[0]
+				if dp.Count != 1 {
+					t.Fatalf("histogram count=%d, want 1", dp.Count)
+				}
+				// 850ms = 0.85s
+				wantSum := 0.85
+				if dp.Sum < wantSum-0.001 || dp.Sum > wantSum+0.001 {
+					t.Fatalf("histogram sum=%f, want ~%f", dp.Sum, wantSum)
+				}
+				gotAttrs := make(map[string]string)
+				for _, kv := range dp.Attributes.ToSlice() {
+					gotAttrs[string(kv.Key)] = kv.Value.Emit()
+				}
+				wantAttrs := map[string]string{
+					"provider":     "openai",
+					"org_id":       "org-test",
+					"workspace_id": "ws-test",
+					"route":        "/openai/*",
+				}
+				for key, want := range wantAttrs {
+					if got := gotAttrs[key]; got != want {
+						t.Fatalf("histogram attribute %q=%q, want %q", key, got, want)
+					}
+				}
+				for key, value := range gotAttrs {
+					if _, ok := wantAttrs[key]; !ok {
+						t.Fatalf("unexpected histogram attribute %q=%q", key, value)
+					}
+				}
+				histogramFound = true
+			}
+		}
+	}
+	if !counterFound {
+		t.Fatal("missing test.proxy.request_total metric")
+	}
+	if !histogramFound {
+		t.Fatal("missing test.proxy.request_duration_seconds metric")
+	}
+}
+
+// Cannot be parallel: mutates global OTel providers.
+func TestRegisterTraceQueueCapacityGaugeReportsValue(t *testing.T) {
+	oldMP := otel.GetMeterProvider()
+	defer otel.SetMeterProvider(oldMP)
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	otel.SetMeterProvider(meterProvider)
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	runtime := &Runtime{enabled: true}
+	runtime.RegisterTraceQueueCapacityGauge(func() int { return 1024 })
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	found := false
+	for _, scope := range metrics.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "ongoingai.trace.queue_capacity" {
+				continue
+			}
+			gauge, ok := m.Data.(metricdata.Gauge[int64])
+			if !ok {
+				t.Fatalf("metric data type=%T, want metricdata.Gauge[int64]", m.Data)
+			}
+			if len(gauge.DataPoints) != 1 {
+				t.Fatalf("datapoints=%d, want 1", len(gauge.DataPoints))
+			}
+			if gauge.DataPoints[0].Value != 1024 {
+				t.Fatalf("value=%d, want 1024", gauge.DataPoints[0].Value)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing ongoingai.trace.queue_capacity metric")
+	}
+}
+
 func TestSpanWrappersNoopWhenDisabled(t *testing.T) {
 	t.Parallel()
 
@@ -1151,6 +1375,11 @@ func TestSpanWrappersNoopWhenDisabled(t *testing.T) {
 			if hook != nil {
 				t.Fatal("MakeWriteSpanHook() should return nil when disabled")
 			}
+
+			// New methods no-op without panic.
+			tt.runtime.RecordTraceWritten(5)
+			tt.runtime.RecordProxyRequest("openai", "org-1", "ws-1", "/openai/v1/chat", 200, 500)
+			tt.runtime.RegisterTraceQueueCapacityGauge(func() int { return 128 })
 		})
 	}
 }

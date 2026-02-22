@@ -65,6 +65,10 @@ type traceWriterQueueLenProvider interface {
 	QueueLen() int
 }
 
+type traceWriterQueueCapProvider interface {
+	QueueCap() int
+}
+
 var newTraceWriter = func(store trace.TraceStore, bufferSize int) asyncTraceWriter {
 	return trace.NewWriter(store, bufferSize)
 }
@@ -458,6 +462,14 @@ func runServe(args []string) int {
 			otelRuntime.RecordProviderRequest(
 				traceRecord.Provider,
 				traceRecord.Model,
+				exchange.StatusCode,
+				exchange.DurationMS,
+			)
+			otelRuntime.RecordProxyRequest(
+				traceRecord.Provider,
+				exchange.GatewayOrgID,
+				exchange.GatewayWorkspaceID,
+				exchange.Path,
 				exchange.StatusCode,
 				exchange.DurationMS,
 			)
@@ -870,15 +882,19 @@ func attachTraceWriterMetrics(writer asyncTraceWriter, otelRuntime *observabilit
 	if qlp, ok := writer.(traceWriterQueueLenProvider); ok {
 		otelRuntime.RegisterTraceQueueDepthGauge(qlp.QueueLen)
 	}
+	if qcp, ok := writer.(traceWriterQueueCapProvider); ok {
+		otelRuntime.RegisterTraceQueueCapacityGauge(qcp.QueueCap)
+	}
 
 	ms, ok := writer.(traceWriterMetricsSetter)
 	if !ok {
 		return
 	}
 	ms.SetMetrics(&trace.WriterMetrics{
-		OnEnqueue:    otelRuntime.RecordTraceEnqueued,
-		OnFlush:      otelRuntime.RecordTraceFlush,
-		OnWriteStart: otelRuntime.MakeWriteSpanHook(),
+		OnEnqueue:      otelRuntime.RecordTraceEnqueued,
+		OnFlush:        otelRuntime.RecordTraceFlush,
+		OnWriteStart:   otelRuntime.MakeWriteSpanHook(),
+		OnWriteSuccess: otelRuntime.RecordTraceWritten,
 		// OnDrop left nil: the captureSink already calls RecordTraceQueueDrop
 		// with richer route/status attributes.
 	})

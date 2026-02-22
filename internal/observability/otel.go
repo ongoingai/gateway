@@ -43,11 +43,15 @@ type Runtime struct {
 	traceQueueDroppedCounter     metric.Int64Counter
 	traceWriteFailedCounter      metric.Int64Counter
 	traceEnqueuedCounter         metric.Int64Counter
+	traceWrittenCounter          metric.Int64Counter
 	traceFlushLatencyHistogram   metric.Float64Histogram
 	traceBatchSizeHistogram      metric.Int64Histogram
 
 	providerRequestCounter           metric.Int64Counter
 	providerRequestDurationHistogram metric.Float64Histogram
+
+	proxyRequestCounter           metric.Int64Counter
+	proxyRequestDurationHistogram metric.Float64Histogram
 
 	shutdownFns []func(context.Context) error
 }
@@ -179,6 +183,15 @@ func Setup(ctx context.Context, cfg config.OTelConfig, serviceVersion string, lo
 	}
 	runtime.traceBatchSizeHistogram = traceBatchSizeHistogram
 
+	traceWrittenCounter, metricErr := meter.Int64Counter(
+		"ongoingai.trace.written_total",
+		metric.WithDescription("Count of traces successfully persisted to storage."),
+	)
+	if metricErr != nil && logger != nil {
+		logger.Warn("failed to create opentelemetry counter", "metric", "ongoingai.trace.written_total", "error", metricErr)
+	}
+	runtime.traceWrittenCounter = traceWrittenCounter
+
 	providerRequestCounter, metricErr := meter.Int64Counter(
 		"ongoingai.provider.request_total",
 		metric.WithDescription("Count of upstream provider requests."),
@@ -197,6 +210,25 @@ func Setup(ctx context.Context, cfg config.OTelConfig, serviceVersion string, lo
 		logger.Warn("failed to create opentelemetry histogram", "metric", "ongoingai.provider.request_duration_seconds", "error", metricErr)
 	}
 	runtime.providerRequestDurationHistogram = providerRequestDurationHistogram
+
+	proxyRequestCounter, metricErr := meter.Int64Counter(
+		"ongoingai.proxy.request_total",
+		metric.WithDescription("Count of proxy requests with tenant scoping."),
+	)
+	if metricErr != nil && logger != nil {
+		logger.Warn("failed to create opentelemetry counter", "metric", "ongoingai.proxy.request_total", "error", metricErr)
+	}
+	runtime.proxyRequestCounter = proxyRequestCounter
+
+	proxyRequestDurationHistogram, metricErr := meter.Float64Histogram(
+		"ongoingai.proxy.request_duration_seconds",
+		metric.WithDescription("Proxy request duration with tenant scoping."),
+		metric.WithUnit("s"),
+	)
+	if metricErr != nil && logger != nil {
+		logger.Warn("failed to create opentelemetry histogram", "metric", "ongoingai.proxy.request_duration_seconds", "error", metricErr)
+	}
+	runtime.proxyRequestDurationHistogram = proxyRequestDurationHistogram
 
 	runtime.tracer = otel.Tracer(instrumentationName)
 	runtime.enabled = true
@@ -516,6 +548,63 @@ func (r *Runtime) RegisterTraceQueueDepthGauge(queueLenFn func() int) {
 	}, gauge)
 	if err != nil {
 		return
+	}
+}
+
+// RecordTraceWritten increments a counter for traces successfully persisted.
+func (r *Runtime) RecordTraceWritten(count int) {
+	if !r.Enabled() || count <= 0 || r.traceWrittenCounter == nil {
+		return
+	}
+	r.traceWrittenCounter.Add(context.Background(), int64(count))
+}
+
+// RegisterTraceQueueCapacityGauge registers an async gauge that reports the
+// trace write queue capacity each collection cycle.
+func (r *Runtime) RegisterTraceQueueCapacityGauge(capacityFn func() int) {
+	if !r.Enabled() || capacityFn == nil {
+		return
+	}
+	meter := otel.Meter(instrumentationName)
+	gauge, err := meter.Int64ObservableGauge(
+		"ongoingai.trace.queue_capacity",
+		metric.WithDescription("Capacity of the async trace write queue."),
+	)
+	if err != nil {
+		return
+	}
+	_, err = meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+		o.ObserveInt64(gauge, int64(capacityFn()))
+		return nil
+	}, gauge)
+	if err != nil {
+		return
+	}
+}
+
+// RecordProxyRequest records a proxy request with tenant-scoped attributes.
+func (r *Runtime) RecordProxyRequest(provider, orgID, workspaceID, path string, statusCode int, durationMS int64) {
+	if !r.Enabled() {
+		return
+	}
+	ctx := context.Background()
+	route := routePatternForPath(path)
+	if r.proxyRequestCounter != nil {
+		r.proxyRequestCounter.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("provider", strings.TrimSpace(provider)),
+			attribute.String("org_id", strings.TrimSpace(orgID)),
+			attribute.String("workspace_id", strings.TrimSpace(workspaceID)),
+			attribute.String("route", route),
+			attribute.Int("status_code", statusCode),
+		))
+	}
+	if r.proxyRequestDurationHistogram != nil {
+		r.proxyRequestDurationHistogram.Record(ctx, float64(durationMS)/1000.0, metric.WithAttributes(
+			attribute.String("provider", strings.TrimSpace(provider)),
+			attribute.String("org_id", strings.TrimSpace(orgID)),
+			attribute.String("workspace_id", strings.TrimSpace(workspaceID)),
+			attribute.String("route", route),
+		))
 	}
 }
 
