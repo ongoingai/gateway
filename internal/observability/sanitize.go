@@ -7,16 +7,22 @@ import (
 
 const credentialRedacted = "[CREDENTIAL_REDACTED]"
 
+// TokenPrefixPattern matches common API key prefix formats:
+// sk_, pk_, rk_, xox*_, ghp/gho/ghu/ghs/ghr_, pat_.
+// Shared between telemetry credential scrubbing and PII redaction in
+// trace body capture (cmd/ongoingai/trace_capture.go).
+var TokenPrefixPattern = regexp.MustCompile(`(?i)\b(?:sk|pk|rk|xox[baprs]|gh[pousr]|pat)_[a-z0-9_-]{8,}\b`)
+
+// JWTPattern matches JWT-like tokens (three base64url segments separated by dots).
+// Shared between telemetry credential scrubbing and PII redaction in
+// trace body capture (cmd/ongoingai/trace_capture.go).
+var JWTPattern = regexp.MustCompile(`(?i)eyj[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}`)
+
 // credentialPatterns detects common credential formats that must never
 // appear in telemetry span attributes or metric labels.
-//
-// Patterns are aligned with the token regex in cmd/ongoingai/trace_capture.go
-// and extended with Bearer header values and connection-string secrets.
 var credentialPatterns = []*regexp.Regexp{
-	// API key prefixes: sk_, pk_, rk_, xox*_, ghp/gho/ghu/ghs/ghr_, pat_
-	regexp.MustCompile(`(?i)\b(?:sk|pk|rk|xox[baprs]|gh[pousr]|pat)_[a-z0-9_-]{8,}\b`),
-	// JWT-like tokens (three base64url segments separated by dots)
-	regexp.MustCompile(`(?i)eyj[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}`),
+	TokenPrefixPattern,
+	JWTPattern,
 	// Bearer token in header-like strings
 	regexp.MustCompile(`(?i)\bBearer\s+[a-z0-9_.\-/+=]{8,}\b`),
 	// Connection string secrets: password=..., secret=..., token=...
