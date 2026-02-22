@@ -21,7 +21,7 @@ This roadmap is organized as priority-ordered phases.
 - Phase 0: Completed (15/15)
 - Phase 1: Completed (20/20)
 - Phase 2: Completed (11/11)
-- Phase 3: In Progress (6/12)
+- Phase 3: Completed (11/11)
 
 ## Phase 0: Foundation And Initial Setup (Completed)
 
@@ -120,7 +120,7 @@ Exit criteria:
 5. Correlation identifiers reliably connect logs, spans, and persisted traces for the same request lifecycle.
 6. Queue-pressure and dropped-trace diagnostics are observable without inspecting raw database tables.
 
-## Phase 3: Observability And OpenTelemetry Expansion (In Progress)
+## Phase 3: Observability And OpenTelemetry Expansion (Completed)
 
 Focus: deepen operational visibility across the gateway with richer metrics, broader OpenTelemetry coverage, and actionable analytics for latency, errors, and cost.
 

@@ -243,6 +243,8 @@ Placeholders:
 | `GET` | `/api/analytics/cost` | `analytics:read` when auth is enabled | `200` cost summary or series |
 | `GET` | `/api/analytics/models` | `analytics:read` when auth is enabled | `200` model stats |
 | `GET` | `/api/analytics/keys` | `analytics:read` when auth is enabled | `200` API key stats |
+| `GET` | `/api/analytics/latency` | `analytics:read` when auth is enabled | `200` latency distribution stats |
+| `GET` | `/api/analytics/errors` | `analytics:read` when auth is enabled | `200` error-rate breakdown stats |
 | `GET` | `/api/analytics/summary` | `analytics:read` when auth is enabled | `200` merged analytics summary |
 
 Shared analytics query parameters:
@@ -265,6 +267,12 @@ Series behavior:
 - If both `group_by` and `bucket` are empty, endpoint returns summary shape.
 - If either is set, endpoint returns series shape.
 - If series mode is enabled and `bucket` is empty, bucket defaults to `day`.
+
+Group options for `/api/analytics/latency` and `/api/analytics/errors`:
+
+| Parameter | Type | Constraints | Notes |
+| --- | --- | --- | --- |
+| `group_by` | string | `provider`, `model`, `route`, `key`, or empty | Returns grouped breakdown rows. |
 
 `GET /api/analytics/summary` response fields:
 - `total_requests`

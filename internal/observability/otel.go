@@ -13,12 +13,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/ongoingai/gateway/internal/auth"
 	"github.com/ongoingai/gateway/internal/config"
 	"github.com/ongoingai/gateway/internal/correlation"
 	"github.com/ongoingai/gateway/internal/pathutil"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -36,19 +36,92 @@ import (
 
 const (
 	instrumentationName = "ongoingai.gateway"
+	telemetryUnknown    = "unknown"
 )
+
+// telemetryScope is the normalized request-scope dimension set used across
+// gateway spans and metrics.
+//
+// Policy: when request scope is available, instrumentation uses these five
+// attributes consistently:
+// - provider
+// - model
+// - org_id
+// - workspace_id
+// - route
+//
+// Values are trimmed, credential-scrubbed, and default to "unknown" when empty.
+type telemetryScope struct {
+	provider    string
+	model       string
+	orgID       string
+	workspaceID string
+	route       string
+}
+
+func newTelemetryScope(provider, model, orgID, workspaceID, path string) telemetryScope {
+	return telemetryScope{
+		provider:    sanitizeTelemetryValue(provider),
+		model:       sanitizeTelemetryValue(model),
+		orgID:       sanitizeTelemetryValue(orgID),
+		workspaceID: sanitizeTelemetryValue(workspaceID),
+		route:       sanitizeTelemetryValue(routePatternForPath(path)),
+	}
+}
+
+func requestTelemetryScope(req *http.Request) telemetryScope {
+	if req == nil {
+		return newTelemetryScope("", "", "", "", "")
+	}
+	provider, _ := providerForPath(req.URL.Path)
+	orgID := ""
+	workspaceID := ""
+	if identity, ok := auth.IdentityFromContext(req.Context()); ok && identity != nil {
+		orgID = identity.OrgID
+		workspaceID = identity.WorkspaceID
+	}
+	return newTelemetryScope(provider, "", orgID, workspaceID, req.URL.Path)
+}
+
+func sanitizeTelemetryValue(raw string) string {
+	value := ScrubCredentials(strings.TrimSpace(raw))
+	if value == "" {
+		return telemetryUnknown
+	}
+	return value
+}
+
+func (s telemetryScope) spanAttributes() []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String("gateway.provider", s.provider),
+		attribute.String("gateway.model", s.model),
+		attribute.String("gateway.org_id", s.orgID),
+		attribute.String("gateway.workspace_id", s.workspaceID),
+		attribute.String("gateway.route", s.route),
+	}
+}
+
+func (s telemetryScope) metricAttributes() []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String("provider", s.provider),
+		attribute.String("model", s.model),
+		attribute.String("org_id", s.orgID),
+		attribute.String("workspace_id", s.workspaceID),
+		attribute.String("route", s.route),
+	}
+}
 
 // Runtime exposes OpenTelemetry HTTP wrappers and gateway metric hooks.
 type Runtime struct {
 	enabled bool
 	tracer  oteltrace.Tracer
 
-	traceQueueDroppedCounter     metric.Int64Counter
-	traceWriteFailedCounter      metric.Int64Counter
-	traceEnqueuedCounter         metric.Int64Counter
-	traceWrittenCounter          metric.Int64Counter
-	traceFlushLatencyHistogram   metric.Float64Histogram
-	traceBatchSizeHistogram      metric.Int64Histogram
+	traceQueueDroppedCounter   metric.Int64Counter
+	traceWriteFailedCounter    metric.Int64Counter
+	traceEnqueuedCounter       metric.Int64Counter
+	traceWrittenCounter        metric.Int64Counter
+	traceFlushLatencyHistogram metric.Float64Histogram
+	traceBatchSizeHistogram    metric.Int64Histogram
 
 	providerRequestCounter           metric.Int64Counter
 	providerRequestDurationHistogram metric.Float64Histogram
@@ -329,24 +402,20 @@ func (r *Runtime) SpanEnrichmentMiddleware(next http.Handler) http.Handler {
 			span.SetStatus(codes.Error, fmt.Sprintf("http %d", statusCode))
 		}
 
-		attrs := make([]attribute.KeyValue, 0, 5)
+		scope := requestTelemetryScope(req)
+		attrs := make([]attribute.KeyValue, 0, 9)
+		attrs = append(attrs, scope.spanAttributes()...)
 		if correlationID, ok := correlation.FromContext(req.Context()); ok {
 			attrs = append(attrs, attribute.String("gateway.correlation_id", correlationID))
 		}
 
 		identity, ok := auth.IdentityFromContext(req.Context())
 		if ok && identity != nil {
-			if orgID := strings.TrimSpace(identity.OrgID); orgID != "" {
-				attrs = append(attrs, attribute.String("gateway.org_id", orgID))
-			}
-			if workspaceID := strings.TrimSpace(identity.WorkspaceID); workspaceID != "" {
-				attrs = append(attrs, attribute.String("gateway.workspace_id", workspaceID))
-			}
 			if gatewayKeyID := strings.TrimSpace(identity.KeyID); gatewayKeyID != "" {
-				attrs = append(attrs, attribute.String("gateway.key_id", gatewayKeyID))
+				attrs = append(attrs, attribute.String("gateway.key_id", sanitizeTelemetryValue(gatewayKeyID)))
 			}
 			if role := strings.TrimSpace(identity.Role); role != "" {
-				attrs = append(attrs, attribute.String("gateway.role", role))
+				attrs = append(attrs, attribute.String("gateway.role", sanitizeTelemetryValue(role)))
 			}
 		}
 		if len(attrs) > 0 {
@@ -368,6 +437,8 @@ func (r *Runtime) WrapAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		ctx, span := r.tracer.Start(req.Context(), "gateway.auth")
 		defer span.End()
+		scope := requestTelemetryScope(req)
+		span.SetAttributes(scope.spanAttributes()...)
 
 		recorder := &statusCapturingResponseWriter{ResponseWriter: w}
 		next.ServeHTTP(recorder, req.WithContext(ctx))
@@ -404,12 +475,14 @@ func (r *Runtime) WrapRouteSpan(next http.Handler) http.Handler {
 
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		provider, prefix := providerForPath(req.URL.Path)
+		scope := requestTelemetryScope(req)
 		ctx, span := r.tracer.Start(req.Context(), "gateway.route")
 		defer span.End()
 
+		span.SetAttributes(scope.spanAttributes()...)
 		span.SetAttributes(
-			attribute.String("gateway.route.provider", provider),
-			attribute.String("gateway.route.prefix", prefix),
+			attribute.String("gateway.route.provider", sanitizeTelemetryValue(provider)),
+			attribute.String("gateway.route.prefix", sanitizeTelemetryValue(prefix)),
 		)
 
 		recorder := &statusCapturingResponseWriter{ResponseWriter: w}
@@ -418,37 +491,37 @@ func (r *Runtime) WrapRouteSpan(next http.Handler) http.Handler {
 		if recorder.StatusCode() >= http.StatusInternalServerError {
 			span.SetStatus(codes.Error, fmt.Sprintf("http %d", recorder.StatusCode()))
 		}
-
-		if identity, ok := auth.IdentityFromContext(req.Context()); ok && identity != nil {
-			if orgID := strings.TrimSpace(identity.OrgID); orgID != "" {
-				span.SetAttributes(attribute.String("gateway.org_id", orgID))
-			}
-			if workspaceID := strings.TrimSpace(identity.WorkspaceID); workspaceID != "" {
-				span.SetAttributes(attribute.String("gateway.workspace_id", workspaceID))
-			}
-		}
 	})
 }
 
 // StartTraceEnqueueSpan starts a gateway.trace.enqueue span as a child of
 // the provided context. The returned function must be called to end the span,
 // passing whether the enqueue was accepted.
-func (r *Runtime) StartTraceEnqueueSpan(ctx context.Context) (context.Context, func(accepted bool)) {
+func (r *Runtime) StartTraceEnqueueSpan(
+	ctx context.Context,
+	provider string,
+	model string,
+	orgID string,
+	workspaceID string,
+	path string,
+) (context.Context, func(accepted bool)) {
 	if !r.Enabled() {
 		return ctx, func(bool) {}
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ctx, span := r.tracer.Start(ctx, "gateway.trace.enqueue")
 	if identity, ok := auth.IdentityFromContext(ctx); ok && identity != nil {
-		if orgID := strings.TrimSpace(identity.OrgID); orgID != "" {
-			span.SetAttributes(attribute.String("gateway.org_id", orgID))
+		if strings.TrimSpace(orgID) == "" {
+			orgID = identity.OrgID
 		}
-		if workspaceID := strings.TrimSpace(identity.WorkspaceID); workspaceID != "" {
-			span.SetAttributes(attribute.String("gateway.workspace_id", workspaceID))
+		if strings.TrimSpace(workspaceID) == "" {
+			workspaceID = identity.WorkspaceID
 		}
 	}
+	scope := newTelemetryScope(provider, model, orgID, workspaceID, path)
+	ctx, span := r.tracer.Start(ctx, "gateway.trace.enqueue")
+	span.SetAttributes(scope.spanAttributes()...)
 	return ctx, func(accepted bool) {
 		if accepted {
 			span.SetAttributes(attribute.String("gateway.trace.enqueue.result", "accepted"))
@@ -469,6 +542,7 @@ func (r *Runtime) MakeWriteSpanHook() func(batchSize int) func(error) {
 	}
 	return func(batchSize int) func(error) {
 		_, span := r.tracer.Start(context.Background(), "gateway.trace.write")
+		span.SetAttributes(newTelemetryScope("", "", "", "", "").spanAttributes()...)
 		span.SetAttributes(attribute.Int("gateway.trace.write.batch_size", batchSize))
 		return func(err error) {
 			if err != nil {
@@ -510,20 +584,16 @@ func (r *Runtime) WrapHTTPTransport(base http.RoundTripper) http.RoundTripper {
 }
 
 // RecordTraceQueueDrop increments a counter when the async trace queue is full.
-func (r *Runtime) RecordTraceQueueDrop(provider, orgID, workspaceID, path string, status int) {
+func (r *Runtime) RecordTraceQueueDrop(provider, model, orgID, workspaceID, path string, status int) {
 	if !r.Enabled() || r.traceQueueDroppedCounter == nil {
 		return
 	}
+	scope := newTelemetryScope(provider, model, orgID, workspaceID, path)
+	attrs := append(scope.metricAttributes(), attribute.Int("status_code", status))
 	r.traceQueueDroppedCounter.Add(
 		context.Background(),
 		1,
-		metric.WithAttributes(
-			attribute.String("provider", strings.TrimSpace(provider)),
-			attribute.String("org_id", strings.TrimSpace(orgID)),
-			attribute.String("workspace_id", strings.TrimSpace(workspaceID)),
-			attribute.String("route", routePatternForPath(path)),
-			attribute.Int("status_code", status),
-		),
+		metric.WithAttributes(attrs...),
 	)
 }
 
@@ -567,25 +637,26 @@ func (r *Runtime) RecordTraceFlush(batchSize int, duration time.Duration) {
 
 // RecordProviderRequest records a single upstream provider request with its
 // status code and latency.
-func (r *Runtime) RecordProviderRequest(provider, model string, statusCode int, durationMS int64) {
+func (r *Runtime) RecordProviderRequest(
+	provider string,
+	model string,
+	orgID string,
+	workspaceID string,
+	path string,
+	statusCode int,
+	durationMS int64,
+) {
 	if !r.Enabled() {
 		return
 	}
 	ctx := context.Background()
-	provider = strings.TrimSpace(provider)
-	model = strings.TrimSpace(model)
+	scope := newTelemetryScope(provider, model, orgID, workspaceID, path)
 	if r.providerRequestCounter != nil {
-		r.providerRequestCounter.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("provider", provider),
-			attribute.String("model", model),
-			attribute.Int("status_code", statusCode),
-		))
+		attrs := append(scope.metricAttributes(), attribute.Int("status_code", statusCode))
+		r.providerRequestCounter.Add(ctx, 1, metric.WithAttributes(attrs...))
 	}
 	if r.providerRequestDurationHistogram != nil {
-		r.providerRequestDurationHistogram.Record(ctx, float64(durationMS)/1000.0, metric.WithAttributes(
-			attribute.String("provider", provider),
-			attribute.String("model", model),
-		))
+		r.providerRequestDurationHistogram.Record(ctx, float64(durationMS)/1000.0, metric.WithAttributes(scope.metricAttributes()...))
 	}
 }
 
@@ -644,28 +715,18 @@ func (r *Runtime) RegisterTraceQueueCapacityGauge(capacityFn func() int) {
 }
 
 // RecordProxyRequest records a proxy request with tenant-scoped attributes.
-func (r *Runtime) RecordProxyRequest(provider, orgID, workspaceID, path string, statusCode int, durationMS int64) {
+func (r *Runtime) RecordProxyRequest(provider, model, orgID, workspaceID, path string, statusCode int, durationMS int64) {
 	if !r.Enabled() {
 		return
 	}
 	ctx := context.Background()
-	route := routePatternForPath(path)
+	scope := newTelemetryScope(provider, model, orgID, workspaceID, path)
 	if r.proxyRequestCounter != nil {
-		r.proxyRequestCounter.Add(ctx, 1, metric.WithAttributes(
-			attribute.String("provider", strings.TrimSpace(provider)),
-			attribute.String("org_id", strings.TrimSpace(orgID)),
-			attribute.String("workspace_id", strings.TrimSpace(workspaceID)),
-			attribute.String("route", route),
-			attribute.Int("status_code", statusCode),
-		))
+		attrs := append(scope.metricAttributes(), attribute.Int("status_code", statusCode))
+		r.proxyRequestCounter.Add(ctx, 1, metric.WithAttributes(attrs...))
 	}
 	if r.proxyRequestDurationHistogram != nil {
-		r.proxyRequestDurationHistogram.Record(ctx, float64(durationMS)/1000.0, metric.WithAttributes(
-			attribute.String("provider", strings.TrimSpace(provider)),
-			attribute.String("org_id", strings.TrimSpace(orgID)),
-			attribute.String("workspace_id", strings.TrimSpace(workspaceID)),
-			attribute.String("route", route),
-		))
+		r.proxyRequestDurationHistogram.Record(ctx, float64(durationMS)/1000.0, metric.WithAttributes(scope.metricAttributes()...))
 	}
 }
 

@@ -248,6 +248,7 @@ Counts trace records dropped because the async trace queue was full.
 | Attribute | Description |
 | --- | --- |
 | `provider` | Provider name (`openai`, `anthropic`). |
+| `model` | Model name from the request (`unknown` when unavailable). |
 | `org_id` | Organization ID. |
 | `workspace_id` | Workspace ID. |
 | `route` | Route pattern (`/openai/*`, `/anthropic/*`, `/api/*`, `/other`). |
@@ -316,6 +317,9 @@ Counts upstream provider requests.
 | --- | --- |
 | `provider` | Provider name (`openai`, `anthropic`). |
 | `model` | Model name from the request. |
+| `org_id` | Organization ID (`unknown` when unavailable). |
+| `workspace_id` | Workspace ID (`unknown` when unavailable). |
+| `route` | Route pattern (`/openai/*`, `/anthropic/*`, `/api/*`, `/other`). |
 | `status_code` | HTTP response status code from the provider. |
 
 #### `ongoingai.provider.request_duration_seconds`
@@ -329,6 +333,9 @@ Upstream provider request duration.
 | --- | --- |
 | `provider` | Provider name (`openai`, `anthropic`). |
 | `model` | Model name from the request. |
+| `org_id` | Organization ID (`unknown` when unavailable). |
+| `workspace_id` | Workspace ID (`unknown` when unavailable). |
+| `route` | Route pattern (`/openai/*`, `/anthropic/*`, `/api/*`, `/other`). |
 
 ### Proxy metrics
 
@@ -341,6 +348,7 @@ Counts proxy requests with tenant scoping.
 | Attribute | Description |
 | --- | --- |
 | `provider` | Provider name (`openai`, `anthropic`). |
+| `model` | Model name from the request (`unknown` when unavailable). |
 | `org_id` | Organization ID. |
 | `workspace_id` | Workspace ID. |
 | `route` | Route pattern (`/openai/*`, `/anthropic/*`, `/api/*`, `/other`). |
@@ -356,6 +364,7 @@ Proxy request duration with tenant scoping.
 | Attribute | Description |
 | --- | --- |
 | `provider` | Provider name (`openai`, `anthropic`). |
+| `model` | Model name from the request (`unknown` when unavailable). |
 | `org_id` | Organization ID. |
 | `workspace_id` | Workspace ID. |
 | `route` | Route pattern (`/openai/*`, `/anthropic/*`, `/api/*`, `/other`). |
@@ -462,9 +471,10 @@ All detected patterns are replaced with `[CREDENTIAL_REDACTED]`.
 
 ### Safety guarantees
 
-- Metric labels are gateway-controlled string constants (provider names,
-  route patterns, error classifications) and do not contain user-supplied
-  credential material.
+- Metric label values are trimmed and credential-scrubbed before export. Any
+  detected credential pattern is replaced with `[CREDENTIAL_REDACTED]`.
+- Missing request-scope label values are emitted as `unknown` to preserve a
+  stable metric schema.
 - Span attributes that could carry credential data (error messages, status
   descriptions) are scrubbed before export.
 - Clean spans with no credential patterns pass through with zero allocation

@@ -462,11 +462,15 @@ func runServe(args []string) int {
 			otelRuntime.RecordProviderRequest(
 				traceRecord.Provider,
 				traceRecord.Model,
+				exchange.GatewayOrgID,
+				exchange.GatewayWorkspaceID,
+				exchange.Path,
 				exchange.StatusCode,
 				exchange.DurationMS,
 			)
 			otelRuntime.RecordProxyRequest(
 				traceRecord.Provider,
+				traceRecord.Model,
 				exchange.GatewayOrgID,
 				exchange.GatewayWorkspaceID,
 				exchange.Path,
@@ -479,7 +483,14 @@ func runServe(args []string) int {
 		if enqueueCtx == nil {
 			enqueueCtx = context.Background()
 		}
-		_, endEnqueueSpan := otelRuntime.StartTraceEnqueueSpan(enqueueCtx)
+		_, endEnqueueSpan := otelRuntime.StartTraceEnqueueSpan(
+			enqueueCtx,
+			traceRecord.Provider,
+			traceRecord.Model,
+			exchange.GatewayOrgID,
+			exchange.GatewayWorkspaceID,
+			exchange.Path,
+		)
 		queued := traceWriter.Enqueue(traceRecord)
 		endEnqueueSpan(queued)
 
@@ -491,7 +502,14 @@ func runServe(args []string) int {
 				"status", exchange.StatusCode,
 			)
 			if otelRuntime != nil {
-				otelRuntime.RecordTraceQueueDrop(traceRecord.Provider, exchange.GatewayOrgID, exchange.GatewayWorkspaceID, exchange.Path, exchange.StatusCode)
+				otelRuntime.RecordTraceQueueDrop(
+					traceRecord.Provider,
+					traceRecord.Model,
+					exchange.GatewayOrgID,
+					exchange.GatewayWorkspaceID,
+					exchange.Path,
+					exchange.StatusCode,
+				)
 			}
 		}
 
