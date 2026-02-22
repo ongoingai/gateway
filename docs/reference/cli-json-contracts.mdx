@@ -1,0 +1,231 @@
+---
+title: CLI JSON contracts
+description: Stable JSON schemas for ongoingai report and ongoingai debug scripting integrations.
+related:
+  title: Next steps
+  description: Jump back to command usage and API references.
+  links:
+    - gateway/reference/cli-reference
+    - gateway/reference/rest-api-reference
+    - gateway/reference/config-reference
+---
+
+Use this page when parsing `ongoingai report --format json` or
+`ongoingai debug --format json` in automation, CI, or monitoring scripts.
+
+## Contract policy
+
+- Every JSON document includes a top-level `schema_version` field.
+- This page documents `report.v1` and `debug-chain.v1`.
+- Within a schema version, field names and meanings are stable.
+- Additive fields may be introduced without a schema version change.
+- Consumers should ignore unknown fields for forward compatibility.
+
+## Report contract (`report.v1`)
+
+Command:
+
+```bash filename="Terminal"
+ongoingai report --format json
+```
+
+Top-level object:
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `schema_version` | string | yes | Always `report.v1` for this contract. |
+| `generated_at` | string (RFC3339) | yes | UTC generation timestamp. |
+| `storage` | object | yes | Storage metadata. |
+| `filters` | object | yes | Echoes selected filters. |
+| `summary` | object | yes | Aggregate totals. |
+| `providers` | array | yes | Provider breakdown rows. |
+| `models` | array | yes | Model stats rows. |
+| `api_keys` | array | yes | API key stats rows. |
+| `recent_traces` | array | yes | Recent trace rows. |
+
+`storage` object:
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `driver` | string | yes | `sqlite` or `postgres`. |
+| `path` | string | no | Present for SQLite path-based setups. |
+
+`filters` object:
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `provider` | string | no | Present when `--provider` is set. |
+| `model` | string | no | Present when `--model` is set. |
+| `from` | string (RFC3339) | no | Omitted unless `--from` is set. |
+| `to` | string (RFC3339) | no | Omitted unless `--to` is set. |
+| `limit` | integer | yes | Echoes `--limit`. |
+
+`summary` object:
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `total_requests` | integer | yes | Request count in scope. |
+| `total_input_tokens` | integer | yes | Summed input tokens. |
+| `total_output_tokens` | integer | yes | Summed output tokens. |
+| `total_tokens` | integer | yes | Summed total tokens. |
+| `total_cost_usd` | number | yes | Summed estimated cost. |
+| `active_keys` | integer | yes | Number of active key rows in scope. |
+| `top_model` | string | no | Most-requested model when present. |
+
+`providers[]` item:
+
+| Field | Type | Required |
+| --- | --- | --- |
+| `provider` | string | yes |
+| `input_tokens` | integer | yes |
+| `output_tokens` | integer | yes |
+| `total_tokens` | integer | yes |
+| `total_cost_usd` | number | yes |
+
+`models[]` item:
+
+| Field | Type | Required |
+| --- | --- | --- |
+| `model` | string | yes |
+| `request_count` | integer | yes |
+| `avg_latency_ms` | number | yes |
+| `avg_ttft_ms` | number | yes |
+| `total_tokens` | integer | yes |
+| `total_cost_usd` | number | yes |
+
+`api_keys[]` item:
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `api_key_hash` | string | yes | Hashed key identifier only. |
+| `request_count` | integer | yes | |
+| `total_tokens` | integer | yes | |
+| `total_cost_usd` | number | yes | |
+| `last_active_at` | string (RFC3339) | no | Omitted when unavailable. |
+
+`recent_traces[]` item:
+
+| Field | Type | Required |
+| --- | --- | --- |
+| `id` | string | yes |
+| `timestamp` | string (RFC3339) | yes |
+| `provider` | string | yes |
+| `model` | string | yes |
+| `response_status` | integer | yes |
+| `total_tokens` | integer | yes |
+| `estimated_cost_usd` | number | yes |
+| `latency_ms` | integer | yes |
+| `request_path` | string | yes |
+
+Ordering guarantees:
+
+- `providers`: `total_tokens` desc, then `total_cost_usd` desc, then provider asc.
+- `models`: `request_count` desc, then model asc.
+- `api_keys`: `request_count` desc, then `api_key_hash` asc.
+- `recent_traces`: timestamp desc, then trace id desc.
+
+## Debug contract (`debug-chain.v1`)
+
+Command:
+
+```bash filename="Terminal"
+ongoingai debug --format json
+```
+
+Top-level object:
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `schema_version` | string | yes | Always `debug-chain.v1` for this contract. |
+| `generated_at` | string (RFC3339) | yes | UTC generation timestamp. |
+| `selection` | object | yes | Echoes trace selection filters. |
+| `options` | object | yes | Echoes debug output options. |
+| `source_trace_id` | string | yes | Trace used as source anchor. |
+| `source_timestamp` | string (RFC3339) | yes | Source ordering timestamp. |
+| `source` | object | yes | Source checkpoint snapshot. |
+| `chain` | object | yes | Ordered checkpoint chain. |
+| `diffs` | array | no | Present when `--diff` is enabled. |
+
+`selection` object:
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `trace_id` | string | no | Present when `--trace-id` is set. |
+| `trace_group_id` | string | no | Present when `--trace-group-id` is set. |
+| `thread_id` | string | no | Present when `--thread-id` is set. |
+| `run_id` | string | no | Present when `--run-id` is set. |
+
+`options` object:
+
+| Field | Type | Required |
+| --- | --- | --- |
+| `limit` | integer | yes |
+| `include_diff` | boolean | yes |
+| `include_headers` | boolean | yes |
+| `include_bodies` | boolean | yes |
+
+`chain` object:
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `group_id` | string | no | Present when lineage group exists. |
+| `thread_id` | string | no | Present when lineage thread exists. |
+| `run_id` | string | no | Present when lineage run exists. |
+| `target_checkpoint_id` | string | yes | Usually the source trace id. |
+| `checkpoint_count` | integer | yes | Number of chain checkpoints returned. |
+| `truncated` | boolean | yes | True when `limit` clips results. |
+| `checkpoints` | array | yes | Ordered checkpoint list. |
+| `lineage_identifier` | string | no | Selection source label. |
+
+`checkpoints[]` and `source` use the same checkpoint shape:
+
+| Field | Type | Required |
+| --- | --- | --- |
+| `step` | integer | yes |
+| `id` | string | yes |
+| `timestamp` | string (RFC3339) | yes |
+| `created_at` | string (RFC3339) | yes |
+| `provider` | string | yes |
+| `model` | string | yes |
+| `request_method` | string | yes |
+| `request_path` | string | yes |
+| `response_status` | integer | yes |
+| `input_tokens` | integer | yes |
+| `output_tokens` | integer | yes |
+| `total_tokens` | integer | yes |
+| `estimated_cost_usd` | number | yes |
+| `latency_ms` | integer | yes |
+| `time_to_first_token_ms` | integer | yes |
+| `time_to_first_token_us` | integer | yes |
+| `lineage` | object | yes |
+| `metadata` | object | no |
+| `request_headers` | string | no |
+| `response_headers` | string | no |
+| `request_body` | string | no |
+| `response_body` | string | no |
+
+`diffs[]` item (when enabled):
+
+- Contains boolean change flags, numeric deltas, byte counts, and metadata key deltas.
+- Includes `from_checkpoint_id` and `to_checkpoint_id` for each diff edge.
+
+Ordering guarantees:
+
+- `chain.checkpoints`: ordered by `created_at` (fallback `timestamp`) ascending, then checkpoint id ascending.
+- `diffs`: ordered to match adjacent checkpoint edges in `chain.checkpoints`.
+
+## Parsing tips
+
+- Gate parsing by `schema_version` first.
+- Treat unknown fields as additive.
+- Prefer explicit null/omission handling for optional fields (`from`, `to`, `diffs`, headers, bodies).
+
+Example schema gate:
+
+```bash filename="Terminal"
+ongoingai report --format json \
+  | jq -e '.schema_version == "report.v1"'
+
+ongoingai debug --format json \
+  | jq -e '.schema_version == "debug-chain.v1"'
+```
