@@ -21,7 +21,7 @@ This roadmap is organized as priority-ordered phases.
 - Phase 0: Completed (15/15)
 - Phase 1: Completed (20/20)
 - Phase 2: Completed (11/11)
-- Phase 3: In Progress (4/12)
+- Phase 3: In Progress (5/12)
 
 ## Phase 0: Foundation And Initial Setup (Completed)
 
@@ -130,7 +130,7 @@ Planned work:
 - [x] Add write failure diagnostics with structured error classification and per-store failure counters.
 - [x] Add provider health metrics: upstream request counts, error rates, and response latency histograms per provider and model.
 - [x] Expand analytics depth for request latency distributions, error rate breakdowns by provider/route/key, and cost trend aggregations over configurable windows.
-- [ ] Add OpenTelemetry spans for key gateway operations: auth evaluation, provider routing, trace enqueue, and storage writes.
+- [x] Add OpenTelemetry spans for key gateway operations: auth evaluation, provider routing, trace enqueue, and storage writes.
 - [ ] Add OpenTelemetry metric instruments (counters, histograms, gauges) for queue pressure, write throughput, provider health, and proxy latency.
 - [ ] Ensure all new spans and metrics carry consistent tenant-scoped attributes (org, workspace, provider, model).
 - [ ] Add Prometheus-compatible metric export support.
