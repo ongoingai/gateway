@@ -379,6 +379,15 @@ func (r *Runtime) WrapRouteSpan(next http.Handler) http.Handler {
 		if recorder.StatusCode() >= http.StatusInternalServerError {
 			span.SetStatus(codes.Error, fmt.Sprintf("http %d", recorder.StatusCode()))
 		}
+
+		if identity, ok := auth.IdentityFromContext(req.Context()); ok && identity != nil {
+			if orgID := strings.TrimSpace(identity.OrgID); orgID != "" {
+				span.SetAttributes(attribute.String("gateway.org_id", orgID))
+			}
+			if workspaceID := strings.TrimSpace(identity.WorkspaceID); workspaceID != "" {
+				span.SetAttributes(attribute.String("gateway.workspace_id", workspaceID))
+			}
+		}
 	})
 }
 
@@ -393,6 +402,14 @@ func (r *Runtime) StartTraceEnqueueSpan(ctx context.Context) (context.Context, f
 		ctx = context.Background()
 	}
 	ctx, span := r.tracer.Start(ctx, "gateway.trace.enqueue")
+	if identity, ok := auth.IdentityFromContext(ctx); ok && identity != nil {
+		if orgID := strings.TrimSpace(identity.OrgID); orgID != "" {
+			span.SetAttributes(attribute.String("gateway.org_id", orgID))
+		}
+		if workspaceID := strings.TrimSpace(identity.WorkspaceID); workspaceID != "" {
+			span.SetAttributes(attribute.String("gateway.workspace_id", workspaceID))
+		}
+	}
 	return ctx, func(accepted bool) {
 		if accepted {
 			span.SetAttributes(attribute.String("gateway.trace.enqueue.result", "accepted"))
@@ -452,7 +469,7 @@ func (r *Runtime) WrapHTTPTransport(base http.RoundTripper) http.RoundTripper {
 }
 
 // RecordTraceQueueDrop increments a counter when the async trace queue is full.
-func (r *Runtime) RecordTraceQueueDrop(path string, status int) {
+func (r *Runtime) RecordTraceQueueDrop(provider, orgID, workspaceID, path string, status int) {
 	if !r.Enabled() || r.traceQueueDroppedCounter == nil {
 		return
 	}
@@ -460,6 +477,9 @@ func (r *Runtime) RecordTraceQueueDrop(path string, status int) {
 		context.Background(),
 		1,
 		metric.WithAttributes(
+			attribute.String("provider", strings.TrimSpace(provider)),
+			attribute.String("org_id", strings.TrimSpace(orgID)),
+			attribute.String("workspace_id", strings.TrimSpace(workspaceID)),
 			attribute.String("route", routePatternForPath(path)),
 			attribute.Int("status_code", status),
 		),

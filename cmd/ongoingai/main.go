@@ -491,7 +491,7 @@ func runServe(args []string) int {
 				"status", exchange.StatusCode,
 			)
 			if otelRuntime != nil {
-				otelRuntime.RecordTraceQueueDrop(exchange.Path, exchange.StatusCode)
+				otelRuntime.RecordTraceQueueDrop(traceRecord.Provider, exchange.GatewayOrgID, exchange.GatewayWorkspaceID, exchange.Path, exchange.StatusCode)
 			}
 		}
 

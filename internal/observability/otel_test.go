@@ -344,6 +344,82 @@ func TestRecordTraceWriteFailureIncludesMetricAttributes(t *testing.T) {
 	}
 }
 
+func TestRecordTraceQueueDropIncludesTenantAttributes(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	counter, err := meterProvider.Meter("test").Int64Counter("test.trace.queue_dropped_total")
+	if err != nil {
+		t.Fatalf("Int64Counter() error: %v", err)
+	}
+
+	runtime := &Runtime{
+		enabled:                  true,
+		traceQueueDroppedCounter: counter,
+	}
+
+	runtime.RecordTraceQueueDrop("openai", "org-drop", "ws-drop", "/openai/v1/chat/completions", 502)
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	found := false
+	var dataPoint metricdata.DataPoint[int64]
+	for _, scope := range metrics.ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			if metric.Name != "test.trace.queue_dropped_total" {
+				continue
+			}
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric data type=%T, want metricdata.Sum[int64]", metric.Data)
+			}
+			if len(sum.DataPoints) != 1 {
+				t.Fatalf("datapoints=%d, want 1", len(sum.DataPoints))
+			}
+			dataPoint = sum.DataPoints[0]
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing test.trace.queue_dropped_total metric")
+	}
+	if dataPoint.Value != 1 {
+		t.Fatalf("value=%d, want 1", dataPoint.Value)
+	}
+
+	gotAttrs := make(map[string]string)
+	for _, kv := range dataPoint.Attributes.ToSlice() {
+		gotAttrs[string(kv.Key)] = kv.Value.Emit()
+	}
+	wantAttrs := map[string]string{
+		"provider":     "openai",
+		"org_id":       "org-drop",
+		"workspace_id": "ws-drop",
+		"route":        "/openai/*",
+		"status_code":  "502",
+	}
+	for key, want := range wantAttrs {
+		if got := gotAttrs[key]; got != want {
+			t.Fatalf("attribute %q=%q, want %q", key, got, want)
+		}
+	}
+	for key, value := range gotAttrs {
+		if _, ok := wantAttrs[key]; !ok {
+			t.Fatalf("unexpected attribute %q=%q", key, value)
+		}
+	}
+}
+
 func TestRecordProviderRequestIncludesMetricAttributes(t *testing.T) {
 	t.Parallel()
 
@@ -514,7 +590,7 @@ func TestSetupExportsTracesAndMetrics(t *testing.T) {
 
 	_, span := otel.Tracer("test").Start(context.Background(), "gateway.test")
 	span.End()
-	runtime.RecordTraceQueueDrop("/openai/v1/chat/completions", http.StatusBadGateway)
+	runtime.RecordTraceQueueDrop("openai", "org-test", "ws-test", "/openai/v1/chat/completions", http.StatusBadGateway)
 	runtime.RecordTraceWriteFailure("write_trace", 2, "unknown", "sqlite")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -642,7 +718,7 @@ func TestRuntimeGuardsDoNotPanic(t *testing.T) {
 				t.Fatal("WrapHTTPTransport should return base transport unchanged")
 			}
 
-			tt.runtime.RecordTraceQueueDrop("/openai/v1/chat", 502)
+			tt.runtime.RecordTraceQueueDrop("openai", "org-1", "ws-1", "/openai/v1/chat", 502)
 			tt.runtime.RecordTraceWriteFailure("write_trace", 5, "unknown", "sqlite")
 			tt.runtime.RecordTraceEnqueued()
 			tt.runtime.RecordTraceWritten(3)
@@ -766,7 +842,7 @@ func TestSetupConfigPermutations(t *testing.T) {
 			t.Fatalf("Setup() error: %v", err)
 		}
 
-		runtime.RecordTraceQueueDrop("/openai/v1/chat", 502)
+		runtime.RecordTraceQueueDrop("openai", "org-1", "ws-1", "/openai/v1/chat", 502)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -925,6 +1001,10 @@ func TestWrapRouteSpanSetsProviderAttributes(t *testing.T) {
 	handler := runtime.WrapRouteSpan(inner)
 
 	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", nil)
+	req = req.WithContext(auth.WithIdentity(req.Context(), &auth.Identity{
+		OrgID:       "org-route",
+		WorkspaceID: "ws-route",
+	}))
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	spans := recorder.Ended()
@@ -941,6 +1021,12 @@ func TestWrapRouteSpanSetsProviderAttributes(t *testing.T) {
 	}
 	if got := attrs["gateway.route.prefix"]; got != "/openai" {
 		t.Fatalf("gateway.route.prefix=%q, want %q", got, "/openai")
+	}
+	if got := attrs["gateway.org_id"]; got != "org-route" {
+		t.Fatalf("gateway.org_id=%q, want %q", got, "org-route")
+	}
+	if got := attrs["gateway.workspace_id"]; got != "ws-route" {
+		t.Fatalf("gateway.workspace_id=%q, want %q", got, "ws-route")
 	}
 	if span.Status().Code == codes.Error {
 		t.Fatal("span status should not be error for 200")
@@ -964,6 +1050,10 @@ func TestWrapRouteSpanSetsErrorOn5xx(t *testing.T) {
 	handler := runtime.WrapRouteSpan(inner)
 
 	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
+	req = req.WithContext(auth.WithIdentity(req.Context(), &auth.Identity{
+		OrgID:       "org-5xx",
+		WorkspaceID: "ws-5xx",
+	}))
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	spans := recorder.Ended()
@@ -974,6 +1064,12 @@ func TestWrapRouteSpanSetsErrorOn5xx(t *testing.T) {
 	attrs := spanAttrMap(span)
 	if got := attrs["gateway.route.provider"]; got != "anthropic" {
 		t.Fatalf("gateway.route.provider=%q, want %q", got, "anthropic")
+	}
+	if got := attrs["gateway.org_id"]; got != "org-5xx" {
+		t.Fatalf("gateway.org_id=%q, want %q", got, "org-5xx")
+	}
+	if got := attrs["gateway.workspace_id"]; got != "ws-5xx" {
+		t.Fatalf("gateway.workspace_id=%q, want %q", got, "ws-5xx")
 	}
 	if span.Status().Code != codes.Error {
 		t.Fatalf("span status=%v, want %v", span.Status().Code, codes.Error)
@@ -991,7 +1087,11 @@ func TestStartTraceEnqueueSpanAccepted(t *testing.T) {
 	defer func() { _ = tp.Shutdown(context.Background()) }()
 
 	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
-	_, endSpan := runtime.StartTraceEnqueueSpan(context.Background())
+	ctx := auth.WithIdentity(context.Background(), &auth.Identity{
+		OrgID:       "org-enqueue",
+		WorkspaceID: "ws-enqueue",
+	})
+	_, endSpan := runtime.StartTraceEnqueueSpan(ctx)
 	endSpan(true)
 
 	spans := recorder.Ended()
@@ -1005,6 +1105,12 @@ func TestStartTraceEnqueueSpanAccepted(t *testing.T) {
 	attrs := spanAttrMap(span)
 	if got := attrs["gateway.trace.enqueue.result"]; got != "accepted" {
 		t.Fatalf("gateway.trace.enqueue.result=%q, want %q", got, "accepted")
+	}
+	if got := attrs["gateway.org_id"]; got != "org-enqueue" {
+		t.Fatalf("gateway.org_id=%q, want %q", got, "org-enqueue")
+	}
+	if got := attrs["gateway.workspace_id"]; got != "ws-enqueue" {
+		t.Fatalf("gateway.workspace_id=%q, want %q", got, "ws-enqueue")
 	}
 	if span.Status().Code == codes.Error {
 		t.Fatal("span status should not be error for accepted enqueue")
@@ -1022,7 +1128,11 @@ func TestStartTraceEnqueueSpanDropped(t *testing.T) {
 	defer func() { _ = tp.Shutdown(context.Background()) }()
 
 	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
-	_, endSpan := runtime.StartTraceEnqueueSpan(context.Background())
+	ctx := auth.WithIdentity(context.Background(), &auth.Identity{
+		OrgID:       "org-dropped",
+		WorkspaceID: "ws-dropped",
+	})
+	_, endSpan := runtime.StartTraceEnqueueSpan(ctx)
 	endSpan(false)
 
 	spans := recorder.Ended()
@@ -1033,6 +1143,12 @@ func TestStartTraceEnqueueSpanDropped(t *testing.T) {
 	attrs := spanAttrMap(span)
 	if got := attrs["gateway.trace.enqueue.result"]; got != "dropped" {
 		t.Fatalf("gateway.trace.enqueue.result=%q, want %q", got, "dropped")
+	}
+	if got := attrs["gateway.org_id"]; got != "org-dropped" {
+		t.Fatalf("gateway.org_id=%q, want %q", got, "org-dropped")
+	}
+	if got := attrs["gateway.workspace_id"]; got != "ws-dropped" {
+		t.Fatalf("gateway.workspace_id=%q, want %q", got, "ws-dropped")
 	}
 	if span.Status().Code != codes.Error {
 		t.Fatalf("span status=%v, want %v", span.Status().Code, codes.Error)
