@@ -38,6 +38,7 @@ const (
 // Runtime exposes OpenTelemetry HTTP wrappers and gateway metric hooks.
 type Runtime struct {
 	enabled bool
+	tracer  oteltrace.Tracer
 
 	traceQueueDroppedCounter     metric.Int64Counter
 	traceWriteFailedCounter      metric.Int64Counter
@@ -197,6 +198,7 @@ func Setup(ctx context.Context, cfg config.OTelConfig, serviceVersion string, lo
 	}
 	runtime.providerRequestDurationHistogram = providerRequestDurationHistogram
 
+	runtime.tracer = otel.Tracer(instrumentationName)
 	runtime.enabled = true
 	if logger != nil {
 		logger.Info(
@@ -280,6 +282,125 @@ func (r *Runtime) SpanEnrichmentMiddleware(next http.Handler) http.Handler {
 			span.SetAttributes(attrs...)
 		}
 	})
+}
+
+// WrapAuthMiddleware wraps an auth handler with a gateway.auth child span.
+// The span records whether the auth check allowed or denied the request.
+func (r *Runtime) WrapAuthMiddleware(next http.Handler) http.Handler {
+	if next == nil {
+		next = http.NotFoundHandler()
+	}
+	if !r.Enabled() {
+		return next
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		ctx, span := r.tracer.Start(req.Context(), "gateway.auth")
+		defer span.End()
+
+		recorder := &statusCapturingResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(recorder, req.WithContext(ctx))
+
+		statusCode := recorder.StatusCode()
+		switch {
+		case statusCode == http.StatusUnauthorized:
+			span.SetAttributes(
+				attribute.String("gateway.auth.result", "deny"),
+				attribute.String("gateway.auth.deny_reason", "unauthorized"),
+			)
+			span.SetStatus(codes.Error, "unauthorized")
+		case statusCode == http.StatusForbidden:
+			span.SetAttributes(
+				attribute.String("gateway.auth.result", "deny"),
+				attribute.String("gateway.auth.deny_reason", "forbidden"),
+			)
+			span.SetStatus(codes.Error, "forbidden")
+		default:
+			span.SetAttributes(attribute.String("gateway.auth.result", "allow"))
+		}
+	})
+}
+
+// WrapRouteSpan wraps a proxy handler with a gateway.route child span.
+// The provider and prefix are inferred from the request path.
+func (r *Runtime) WrapRouteSpan(next http.Handler) http.Handler {
+	if next == nil {
+		next = http.NotFoundHandler()
+	}
+	if !r.Enabled() {
+		return next
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		provider, prefix := providerForPath(req.URL.Path)
+		ctx, span := r.tracer.Start(req.Context(), "gateway.route")
+		defer span.End()
+
+		span.SetAttributes(
+			attribute.String("gateway.route.provider", provider),
+			attribute.String("gateway.route.prefix", prefix),
+		)
+
+		recorder := &statusCapturingResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(recorder, req.WithContext(ctx))
+
+		if recorder.StatusCode() >= http.StatusInternalServerError {
+			span.SetStatus(codes.Error, fmt.Sprintf("http %d", recorder.StatusCode()))
+		}
+	})
+}
+
+// StartTraceEnqueueSpan starts a gateway.trace.enqueue span as a child of
+// the provided context. The returned function must be called to end the span,
+// passing whether the enqueue was accepted.
+func (r *Runtime) StartTraceEnqueueSpan(ctx context.Context) (context.Context, func(accepted bool)) {
+	if !r.Enabled() {
+		return ctx, func(bool) {}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, span := r.tracer.Start(ctx, "gateway.trace.enqueue")
+	return ctx, func(accepted bool) {
+		if accepted {
+			span.SetAttributes(attribute.String("gateway.trace.enqueue.result", "accepted"))
+		} else {
+			span.SetAttributes(attribute.String("gateway.trace.enqueue.result", "dropped"))
+			span.SetStatus(codes.Error, "trace dropped")
+		}
+		span.End()
+	}
+}
+
+// MakeWriteSpanHook returns a function suitable for WriterMetrics.OnWriteStart.
+// Each invocation starts a top-level gateway.trace.write span and returns an
+// end function the writer calls after the storage write completes.
+func (r *Runtime) MakeWriteSpanHook() func(batchSize int) func(error) {
+	if !r.Enabled() {
+		return nil
+	}
+	return func(batchSize int) func(error) {
+		_, span := r.tracer.Start(context.Background(), "gateway.trace.write")
+		span.SetAttributes(attribute.Int("gateway.trace.write.batch_size", batchSize))
+		return func(err error) {
+			if err != nil {
+				span.SetAttributes(attribute.String("gateway.trace.write.error_class", err.Error()))
+				span.SetStatus(codes.Error, "write failed")
+			}
+			span.End()
+		}
+	}
+}
+
+func providerForPath(path string) (provider, prefix string) {
+	switch {
+	case pathutil.HasPathPrefix(path, "/openai"):
+		return "openai", "/openai"
+	case pathutil.HasPathPrefix(path, "/anthropic"):
+		return "anthropic", "/anthropic"
+	default:
+		return "unknown", "/"
+	}
 }
 
 // WrapHTTPTransport wraps an outbound HTTP transport with OpenTelemetry spans.

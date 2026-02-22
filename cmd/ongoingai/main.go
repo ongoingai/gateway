@@ -444,6 +444,9 @@ func runServe(args []string) int {
 		return 1
 	}
 	guardedProxyHandler := piiGuardrailMiddleware(cfg, logger, proxyHandler)
+	if otelRuntime != nil {
+		guardedProxyHandler = otelRuntime.WrapRouteSpan(guardedProxyHandler)
+	}
 
 	captureSink := func(exchange *proxy.CapturedExchange) {
 		if !shouldCaptureTrace(exchange.Path) {
@@ -459,7 +462,16 @@ func runServe(args []string) int {
 				exchange.DurationMS,
 			)
 		}
-		if queued := traceWriter.Enqueue(traceRecord); !queued {
+
+		enqueueCtx := exchange.Context
+		if enqueueCtx == nil {
+			enqueueCtx = context.Background()
+		}
+		_, endEnqueueSpan := otelRuntime.StartTraceEnqueueSpan(enqueueCtx)
+		queued := traceWriter.Enqueue(traceRecord)
+		endEnqueueSpan(queued)
+
+		if !queued {
 			logger.Warn(
 				"trace queue is full; dropping trace",
 				"correlation_id", strings.TrimSpace(exchange.CorrelationID),
@@ -523,6 +535,9 @@ func runServe(args []string) int {
 		protectedHandler = auth.DynamicMiddleware(func(_ *http.Request) (*auth.Authorizer, error) {
 			return authorizerCache.Current(gatewayKeyCacheMaxStaleness)
 		}, authOptions, captureHandler)
+	}
+	if otelRuntime != nil {
+		protectedHandler = otelRuntime.WrapAuthMiddleware(protectedHandler)
 	}
 
 	serverHandler := protectedHandler
@@ -861,8 +876,9 @@ func attachTraceWriterMetrics(writer asyncTraceWriter, otelRuntime *observabilit
 		return
 	}
 	ms.SetMetrics(&trace.WriterMetrics{
-		OnEnqueue: otelRuntime.RecordTraceEnqueued,
-		OnFlush:   otelRuntime.RecordTraceFlush,
+		OnEnqueue:    otelRuntime.RecordTraceEnqueued,
+		OnFlush:      otelRuntime.RecordTraceFlush,
+		OnWriteStart: otelRuntime.MakeWriteSpanHook(),
 		// OnDrop left nil: the captureSink already calls RecordTraceQueueDrop
 		// with richer route/status attributes.
 	})

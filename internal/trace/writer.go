@@ -64,6 +64,9 @@ type WriterMetrics struct {
 	OnDrop func()
 	// OnFlush is called after each batch is flushed to storage.
 	OnFlush func(batchSize int, duration time.Duration)
+	// OnWriteStart is called before each storage write. It returns an end
+	// function that the writer calls after the write completes (with error or nil).
+	OnWriteStart func(batchSize int) func(error)
 }
 
 type Writer struct {
@@ -425,6 +428,17 @@ func (w *Writer) flushBatch(ctx context.Context, batch []*Trace) {
 		return
 	}
 	start := time.Now()
+	if m := w.loadMetrics(); m != nil && m.OnWriteStart != nil {
+		droppedBefore := w.writeDroppedTotal.Load()
+		endSpan := m.OnWriteStart(len(batch))
+		defer func() {
+			var writeErr error
+			if w.writeDroppedTotal.Load() > droppedBefore {
+				writeErr = errors.New("batch had write failures")
+			}
+			endSpan(writeErr)
+		}()
+	}
 	defer func() {
 		if m := w.loadMetrics(); m != nil && m.OnFlush != nil {
 			m.OnFlush(len(batch), time.Since(start))

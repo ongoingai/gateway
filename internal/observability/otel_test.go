@@ -832,3 +832,333 @@ func TestRecordTraceEnqueuedAndFlushMetrics(t *testing.T) {
 		return metricRequests.Load() > 0
 	})
 }
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestWrapAuthMiddlewareAllowSetsSpanAttributes(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := runtime.WrapAuthMiddleware(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", nil)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	span := spans[0]
+	if span.Name() != "gateway.auth" {
+		t.Fatalf("span name=%q, want %q", span.Name(), "gateway.auth")
+	}
+	if span.Status().Code == codes.Error {
+		t.Fatal("span status should not be error for allow")
+	}
+	attrs := spanAttrMap(span)
+	if got := attrs["gateway.auth.result"]; got != "allow" {
+		t.Fatalf("gateway.auth.result=%q, want %q", got, "allow")
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestWrapAuthMiddlewareDenySetsSpanAttributes(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	})
+	handler := runtime.WrapAuthMiddleware(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", nil)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	span := spans[0]
+	if span.Status().Code != codes.Error {
+		t.Fatalf("span status=%v, want %v", span.Status().Code, codes.Error)
+	}
+	attrs := spanAttrMap(span)
+	if got := attrs["gateway.auth.result"]; got != "deny" {
+		t.Fatalf("gateway.auth.result=%q, want %q", got, "deny")
+	}
+	if got := attrs["gateway.auth.deny_reason"]; got != "forbidden" {
+		t.Fatalf("gateway.auth.deny_reason=%q, want %q", got, "forbidden")
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestWrapRouteSpanSetsProviderAttributes(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := runtime.WrapRouteSpan(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", nil)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	span := spans[0]
+	if span.Name() != "gateway.route" {
+		t.Fatalf("span name=%q, want %q", span.Name(), "gateway.route")
+	}
+	attrs := spanAttrMap(span)
+	if got := attrs["gateway.route.provider"]; got != "openai" {
+		t.Fatalf("gateway.route.provider=%q, want %q", got, "openai")
+	}
+	if got := attrs["gateway.route.prefix"]; got != "/openai" {
+		t.Fatalf("gateway.route.prefix=%q, want %q", got, "/openai")
+	}
+	if span.Status().Code == codes.Error {
+		t.Fatal("span status should not be error for 200")
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestWrapRouteSpanSetsErrorOn5xx(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	})
+	handler := runtime.WrapRouteSpan(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	span := spans[0]
+	attrs := spanAttrMap(span)
+	if got := attrs["gateway.route.provider"]; got != "anthropic" {
+		t.Fatalf("gateway.route.provider=%q, want %q", got, "anthropic")
+	}
+	if span.Status().Code != codes.Error {
+		t.Fatalf("span status=%v, want %v", span.Status().Code, codes.Error)
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestStartTraceEnqueueSpanAccepted(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	_, endSpan := runtime.StartTraceEnqueueSpan(context.Background())
+	endSpan(true)
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	span := spans[0]
+	if span.Name() != "gateway.trace.enqueue" {
+		t.Fatalf("span name=%q, want %q", span.Name(), "gateway.trace.enqueue")
+	}
+	attrs := spanAttrMap(span)
+	if got := attrs["gateway.trace.enqueue.result"]; got != "accepted" {
+		t.Fatalf("gateway.trace.enqueue.result=%q, want %q", got, "accepted")
+	}
+	if span.Status().Code == codes.Error {
+		t.Fatal("span status should not be error for accepted enqueue")
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestStartTraceEnqueueSpanDropped(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	_, endSpan := runtime.StartTraceEnqueueSpan(context.Background())
+	endSpan(false)
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	span := spans[0]
+	attrs := spanAttrMap(span)
+	if got := attrs["gateway.trace.enqueue.result"]; got != "dropped" {
+		t.Fatalf("gateway.trace.enqueue.result=%q, want %q", got, "dropped")
+	}
+	if span.Status().Code != codes.Error {
+		t.Fatalf("span status=%v, want %v", span.Status().Code, codes.Error)
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestMakeWriteSpanHookRecordsSpan(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	hook := runtime.MakeWriteSpanHook()
+	if hook == nil {
+		t.Fatal("MakeWriteSpanHook() returned nil")
+	}
+	endFn := hook(5)
+	endFn(nil)
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	span := spans[0]
+	if span.Name() != "gateway.trace.write" {
+		t.Fatalf("span name=%q, want %q", span.Name(), "gateway.trace.write")
+	}
+	attrs := spanAttrMap(span)
+	if got := attrs["gateway.trace.write.batch_size"]; got != "5" {
+		t.Fatalf("gateway.trace.write.batch_size=%q, want %q", got, "5")
+	}
+	if span.Status().Code == codes.Error {
+		t.Fatal("span status should not be error for successful write")
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestMakeWriteSpanHookRecordsErrorSpan(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	hook := runtime.MakeWriteSpanHook()
+	endFn := hook(3)
+	endFn(errors.New("connection refused"))
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	span := spans[0]
+	attrs := spanAttrMap(span)
+	if got := attrs["gateway.trace.write.batch_size"]; got != "3" {
+		t.Fatalf("gateway.trace.write.batch_size=%q, want %q", got, "3")
+	}
+	if got := attrs["gateway.trace.write.error_class"]; got != "connection refused" {
+		t.Fatalf("gateway.trace.write.error_class=%q, want %q", got, "connection refused")
+	}
+	if span.Status().Code != codes.Error {
+		t.Fatalf("span status=%v, want %v", span.Status().Code, codes.Error)
+	}
+}
+
+func TestSpanWrappersNoopWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	runtimes := []struct {
+		name    string
+		runtime *Runtime
+	}{
+		{name: "nil runtime", runtime: nil},
+		{name: "disabled runtime", runtime: &Runtime{enabled: false}},
+	}
+
+	for _, tt := range runtimes {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			})
+
+			// WrapAuthMiddleware passes through.
+			authWrapped := tt.runtime.WrapAuthMiddleware(handler)
+			rec := httptest.NewRecorder()
+			authWrapped.ServeHTTP(rec, httptest.NewRequest("POST", "/openai/v1/chat", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("WrapAuthMiddleware pass-through status=%d, want 200", rec.Code)
+			}
+
+			// WrapRouteSpan passes through.
+			routeWrapped := tt.runtime.WrapRouteSpan(handler)
+			rec = httptest.NewRecorder()
+			routeWrapped.ServeHTTP(rec, httptest.NewRequest("POST", "/openai/v1/chat", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("WrapRouteSpan pass-through status=%d, want 200", rec.Code)
+			}
+
+			// StartTraceEnqueueSpan returns noop end function.
+			ctx, endSpan := tt.runtime.StartTraceEnqueueSpan(context.Background())
+			endSpan(true)
+			endSpan(false)
+			if ctx == nil {
+				t.Fatal("StartTraceEnqueueSpan returned nil context")
+			}
+
+			// MakeWriteSpanHook returns nil.
+			hook := tt.runtime.MakeWriteSpanHook()
+			if hook != nil {
+				t.Fatal("MakeWriteSpanHook() should return nil when disabled")
+			}
+		})
+	}
+}
+
+func spanAttrMap(span sdktrace.ReadOnlySpan) map[string]string {
+	attrs := make(map[string]string)
+	for _, a := range span.Attributes() {
+		attrs[string(a.Key)] = a.Value.Emit()
+	}
+	return attrs
+}
