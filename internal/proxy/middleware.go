@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ongoingai/gateway/internal/auth"
+	"github.com/ongoingai/gateway/internal/correlation"
 )
 
 func LoggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
@@ -21,11 +22,18 @@ func LoggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var correlationID string
+		r, correlationID = correlation.EnsureRequest(r)
+		if correlationID != "" {
+			w.Header().Set(correlation.HeaderName, correlationID)
+		}
+
 		start := time.Now()
 		recorder := newStatusResponseWriter(w)
 		next.ServeHTTP(recorder, r)
 		logger.Info(
 			"request complete",
+			"correlation_id", correlationID,
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", recorder.StatusCode(),
@@ -60,6 +68,7 @@ type CapturedExchange struct {
 	GatewayKeyID          string
 	GatewayTeam           string
 	GatewayRole           string
+	CorrelationID         string
 }
 
 type BodyCaptureSink func(*CapturedExchange)
@@ -76,6 +85,9 @@ func BodyCaptureMiddleware(options BodyCaptureOptions, sink BodyCaptureSink, nex
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var correlationID string
+		r, correlationID = correlation.EnsureRequest(r)
+
 		start := time.Now()
 
 		captureBodies := options.Enabled || options.ParseBodies
@@ -146,6 +158,7 @@ func BodyCaptureMiddleware(options BodyCaptureOptions, sink BodyCaptureSink, nex
 			GatewayKeyID:          gatewayKeyID,
 			GatewayTeam:           gatewayTeam,
 			GatewayRole:           gatewayRole,
+			CorrelationID:         correlationID,
 		})
 	})
 }

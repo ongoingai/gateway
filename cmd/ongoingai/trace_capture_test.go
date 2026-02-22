@@ -251,6 +251,32 @@ func TestBuildTraceRecordIncludesGatewayIdentityMetadata(t *testing.T) {
 	}
 }
 
+func TestBuildTraceRecordIncludesCorrelationIDMetadata(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	cfg.Tracing.CaptureBodies = false
+
+	exchange := &proxy.CapturedExchange{
+		Method:         http.MethodPost,
+		Path:           "/openai/v1/chat/completions",
+		StatusCode:     http.StatusOK,
+		CorrelationID:  "corr-trace-1",
+		ResponseBody:   []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`),
+		RequestHeaders: http.Header{"Content-Type": {"application/json"}},
+	}
+
+	record := buildTraceRecord(cfg, providers.DefaultRegistry(), exchange)
+
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(record.Metadata), &metadata); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if metadata["correlation_id"] != "corr-trace-1" {
+		t.Fatalf("correlation_id=%v, want corr-trace-1", metadata["correlation_id"])
+	}
+}
+
 func TestBuildTraceRecordIncludesLineageMetadataAndCheckpoint(t *testing.T) {
 	t.Parallel()
 

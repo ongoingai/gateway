@@ -1,6 +1,6 @@
 ---
 title: CLI JSON contracts
-description: Stable JSON schemas for ongoingai report and ongoingai debug scripting integrations.
+description: Stable JSON schemas for ongoingai report, debug, and diagnostics scripting integrations.
 related:
   title: Next steps
   description: Jump back to command usage and API references.
@@ -10,13 +10,15 @@ related:
     - gateway/reference/config-reference
 ---
 
-Use this page when parsing `ongoingai report --format json` or
-`ongoingai debug --format json` in automation, CI, or monitoring scripts.
+Use this page when parsing `ongoingai report --format json`,
+`ongoingai debug --format json`, or
+`ongoingai diagnostics --format json` in automation, CI, or monitoring scripts.
 
 ## Contract policy
 
 - Every JSON document includes a top-level `schema_version` field.
-- This page documents `report.v1` and `debug-chain.v1`.
+- This page documents `report.v1`, `debug-chain.v1`, and
+  `trace-pipeline-diagnostics.v1`.
 - Within a schema version, field names and meanings are stable.
 - Additive fields may be introduced without a schema version change.
 - Consumers should ignore unknown fields for forward compatibility.
@@ -218,6 +220,41 @@ Ordering guarantees:
   - fallback `created_at` (then `timestamp`) ascending, then checkpoint id ascending.
 - `diffs`: ordered to match adjacent checkpoint edges in `chain.checkpoints`.
 
+## Diagnostics contract (`trace-pipeline-diagnostics.v1`)
+
+Command:
+
+```bash filename="Terminal"
+ongoingai diagnostics --format json
+```
+
+Top-level object:
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `schema_version` | string | yes | Always `trace-pipeline-diagnostics.v1`. |
+| `generated_at` | string (RFC3339) | yes | UTC generation timestamp from gateway API response. |
+| `diagnostics` | object | yes | Trace-pipeline queue pressure and dropped-trace counters. |
+
+`diagnostics` object:
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `queue_capacity` | integer | yes | Configured async writer queue capacity. |
+| `queue_depth` | integer | yes | Current queue depth at snapshot time. |
+| `queue_depth_high_watermark` | integer | yes | Highest observed queue depth since process start. |
+| `queue_utilization_pct` | integer | yes | Current queue depth utilization percentage (`0-100`). |
+| `queue_high_watermark_utilization_pct` | integer | yes | High-watermark utilization percentage (`0-100`). |
+| `queue_pressure_state` | string | yes | One of `ok`, `elevated`, `high`, `saturated`. |
+| `queue_high_watermark_pressure_state` | string | yes | One of `ok`, `elevated`, `high`, `saturated`. |
+| `enqueue_accepted_total` | integer | yes | Total traces accepted into queue. |
+| `enqueue_dropped_total` | integer | yes | Total traces dropped because queue was full. |
+| `write_dropped_total` | integer | yes | Total traces dropped after storage write failures. |
+| `total_dropped_total` | integer | yes | Sum of enqueue and write drops. |
+| `last_enqueue_drop_at` | string (RFC3339) | no | Present after at least one queue-full drop. |
+| `last_write_drop_at` | string (RFC3339) | no | Present after at least one write-drop event. |
+| `last_write_drop_operation` | string | no | Last write operation label that dropped traces. |
+
 ## Parsing tips
 
 - Gate parsing by `schema_version` first.
@@ -232,4 +269,7 @@ ongoingai report --format json \
 
 ongoingai debug --format json \
   | jq -e '.schema_version == "debug-chain.v1"'
+
+ongoingai diagnostics --format json \
+  | jq -e '.schema_version == "trace-pipeline-diagnostics.v1"'
 ```

@@ -20,7 +20,7 @@ This roadmap is organized as priority-ordered phases.
 
 - Phase 0: Completed (15/15)
 - Phase 1: Completed (20/20)
-- Phase 2: Planned (9/11)
+- Phase 2: Completed (11/11)
 
 ## Phase 0: Foundation And Initial Setup (Completed)
 
@@ -92,7 +92,7 @@ Exit criteria:
 7. Self-hosting guide covers setup, configuration, storage driver selection, and basic troubleshooting.
 8. Write-path architecture allows backend transition (direct DB -> ingest service) with minimal gateway surface changes.
 
-## Phase 2: Debugging, Development Velocity, And Trace Intelligence (Planned)
+## Phase 2: Debugging, Development Velocity, And Trace Intelligence (Completed)
 
 Focus: make local and production troubleshooting faster while improving trace fidelity, lineage clarity, and day-to-day developer workflows.
 
@@ -107,8 +107,8 @@ Planned work:
 - [x] Add end-to-end tests that assert report/debug outputs against seeded trace fixtures for SQLite and Postgres.
 - [x] Strengthen lineage reconstruction guarantees for out-of-order writes and partial lineage metadata.
 - [x] Improve streaming trace assembly coverage for malformed chunks, partial usage payloads, and mixed provider event formats.
-- [ ] Add correlation identifiers across logs, OpenTelemetry spans, and stored traces for one-hop pivoting during incidents.
-- [ ] Add explicit queue-pressure and dropped-trace diagnostics surfaces suitable for both API and CLI consumption.
+- [x] Add correlation identifiers across logs, OpenTelemetry spans, and stored traces for one-hop pivoting during incidents.
+- [x] Add explicit queue-pressure and dropped-trace diagnostics surfaces suitable for both API and CLI consumption.
 
 Exit criteria:
 

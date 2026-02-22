@@ -264,6 +264,63 @@ func TestWriterEnqueueReturnsFalseWhenQueueIsFull(t *testing.T) {
 	}
 }
 
+func TestWriterTracePipelineDiagnosticsTracksQueuePressureAndDrops(t *testing.T) {
+	t.Parallel()
+
+	store := &blockingStore{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	writer := NewWriter(store, 1)
+	writer.Start(context.Background())
+
+	if !writer.Enqueue(&Trace{ID: "trace-1"}) {
+		t.Fatal("first enqueue unexpectedly failed")
+	}
+
+	select {
+	case <-store.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first write to block")
+	}
+
+	if !writer.Enqueue(&Trace{ID: "trace-2"}) {
+		t.Fatal("second enqueue unexpectedly failed")
+	}
+	if writer.Enqueue(&Trace{ID: "trace-3"}) {
+		t.Fatal("third enqueue should fail when queue is full")
+	}
+
+	snapshot := writer.TracePipelineDiagnostics()
+	if snapshot.QueueCapacity != 1 {
+		t.Fatalf("queue_capacity=%d, want 1", snapshot.QueueCapacity)
+	}
+	if snapshot.QueueDepth != 1 {
+		t.Fatalf("queue_depth=%d, want 1", snapshot.QueueDepth)
+	}
+	if snapshot.QueueDepthHighWatermark != 1 {
+		t.Fatalf("queue_depth_high_watermark=%d, want 1", snapshot.QueueDepthHighWatermark)
+	}
+	if snapshot.QueuePressureState != TraceQueuePressureSaturated {
+		t.Fatalf("queue_pressure_state=%q, want %q", snapshot.QueuePressureState, TraceQueuePressureSaturated)
+	}
+	if snapshot.EnqueueAcceptedTotal != 2 {
+		t.Fatalf("enqueue_accepted_total=%d, want 2", snapshot.EnqueueAcceptedTotal)
+	}
+	if snapshot.EnqueueDroppedTotal != 1 {
+		t.Fatalf("enqueue_dropped_total=%d, want 1", snapshot.EnqueueDroppedTotal)
+	}
+	if snapshot.TotalDroppedTotal != 1 {
+		t.Fatalf("total_dropped_total=%d, want 1", snapshot.TotalDroppedTotal)
+	}
+	if snapshot.LastEnqueueDropAt == nil {
+		t.Fatal("last_enqueue_drop_at should be set")
+	}
+
+	close(store.release)
+	writer.Stop()
+}
+
 func TestWriterContinuesAfterWriteFailures(t *testing.T) {
 	t.Parallel()
 
@@ -311,6 +368,38 @@ func TestWriterContinuesAfterWriteFailures(t *testing.T) {
 			}
 			return
 		}
+	}
+}
+
+func TestWriterTracePipelineDiagnosticsTracksWriteDrops(t *testing.T) {
+	t.Parallel()
+
+	store := &flakyStore{failFirst: 2}
+	writer := NewWriter(store, 8)
+	writer.Start(context.Background())
+
+	for i := 0; i < 4; i++ {
+		if !writer.Enqueue(&Trace{ID: time.Now().UTC().String()}) {
+			t.Fatalf("enqueue failed at index %d", i)
+		}
+	}
+	writer.Stop()
+
+	snapshot := writer.TracePipelineDiagnostics()
+	if snapshot.EnqueueAcceptedTotal != 4 {
+		t.Fatalf("enqueue_accepted_total=%d, want 4", snapshot.EnqueueAcceptedTotal)
+	}
+	if snapshot.WriteDroppedTotal != 2 {
+		t.Fatalf("write_dropped_total=%d, want 2", snapshot.WriteDroppedTotal)
+	}
+	if snapshot.TotalDroppedTotal != 2 {
+		t.Fatalf("total_dropped_total=%d, want 2", snapshot.TotalDroppedTotal)
+	}
+	if snapshot.LastWriteDropAt == nil {
+		t.Fatal("last_write_drop_at should be set")
+	}
+	if snapshot.LastWriteDropOperation != "write_batch_fallback" {
+		t.Fatalf("last_write_drop_operation=%q, want write_batch_fallback", snapshot.LastWriteDropOperation)
 	}
 }
 

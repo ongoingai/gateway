@@ -16,6 +16,7 @@ Gateway keys are scoped to a workspace. Traces and analytics are read in workspa
 |----------|--------|-------|---------|--------|---------------------|
 | `health` | `read` | `public` | `GET`, `HEAD` | `/api/health` | none |
 | `traces` | `read` | `workspace` | `GET`, `HEAD` | `/api/traces`, `/api/traces/:id` | `analytics:read` |
+| `diagnostics` | `read` | `workspace` | `GET`, `HEAD` | `/api/diagnostics/trace-pipeline` | `analytics:read` |
 | `analytics` | `read` | `workspace` | `GET`, `HEAD` | `/api/analytics/*` | `analytics:read` |
 | `gateway_keys` | `manage` | `workspace` | `GET`, `POST`, `DELETE` | `/api/gateway-keys*` | `keys:manage` |
 | `proxy` | `forward` | `workspace` | `*` | `/openai/*`, `/anthropic/*` | `proxy:write` |

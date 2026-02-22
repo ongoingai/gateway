@@ -61,6 +61,17 @@ type stubGatewayKeyStore struct {
 	lastRotateFilter configstore.GatewayKeyFilter
 }
 
+type stubTracePipelineDiagnosticsReader struct {
+	snapshot trace.TracePipelineDiagnostics
+}
+
+func (s *stubTracePipelineDiagnosticsReader) TracePipelineDiagnostics() trace.TracePipelineDiagnostics {
+	if s == nil {
+		return trace.TracePipelineDiagnostics{}
+	}
+	return s.snapshot
+}
+
 func (s *stubGatewayKeyStore) ListGatewayKeys(_ context.Context, filter configstore.GatewayKeyFilter) ([]configstore.GatewayKey, error) {
 	s.lastFilter = filter
 	if s.keysErr != nil {
@@ -894,6 +905,84 @@ func TestRouterAnalyticsSummaryAndHealth(t *testing.T) {
 	}
 	if healthBody["db_size_bytes"] == nil || healthBody["db_size_bytes"].(float64) <= 0 {
 		t.Fatalf("db_size_bytes=%v, want > 0", healthBody["db_size_bytes"])
+	}
+}
+
+func TestRouterTracePipelineDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	lastQueueDrop := time.Date(2026, 2, 22, 3, 4, 5, 0, time.UTC)
+	lastWriteDrop := time.Date(2026, 2, 22, 3, 5, 6, 0, time.UTC)
+	handler := NewRouter(RouterOptions{
+		AppVersion: "dev",
+		Store:      &stubStore{},
+		TracePipelineReader: &stubTracePipelineDiagnosticsReader{
+			snapshot: trace.TracePipelineDiagnostics{
+				QueueCapacity:                    1024,
+				QueueDepth:                       16,
+				QueueDepthHighWatermark:          900,
+				QueueUtilizationPct:              1,
+				QueueHighWatermarkUtilizationPct: 87,
+				QueuePressureState:               trace.TraceQueuePressureOK,
+				QueueHighWatermarkPressureState:  trace.TraceQueuePressureHigh,
+				EnqueueAcceptedTotal:             500,
+				EnqueueDroppedTotal:              4,
+				WriteDroppedTotal:                2,
+				TotalDroppedTotal:                6,
+				LastEnqueueDropAt:                &lastQueueDrop,
+				LastWriteDropAt:                  &lastWriteDrop,
+				LastWriteDropOperation:           "write_batch_fallback",
+			},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/diagnostics/trace-pipeline", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rec.Code)
+	}
+
+	var payload tracePipelineDiagnosticsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.SchemaVersion != tracePipelineDiagnosticsSchemaVersion {
+		t.Fatalf("schema_version=%q, want %q", payload.SchemaVersion, tracePipelineDiagnosticsSchemaVersion)
+	}
+	if payload.Diagnostics.QueueCapacity != 1024 {
+		t.Fatalf("queue_capacity=%d, want 1024", payload.Diagnostics.QueueCapacity)
+	}
+	if payload.Diagnostics.EnqueueDroppedTotal != 4 {
+		t.Fatalf("enqueue_dropped_total=%d, want 4", payload.Diagnostics.EnqueueDroppedTotal)
+	}
+	if payload.Diagnostics.WriteDroppedTotal != 2 {
+		t.Fatalf("write_dropped_total=%d, want 2", payload.Diagnostics.WriteDroppedTotal)
+	}
+	if payload.Diagnostics.TotalDroppedTotal != 6 {
+		t.Fatalf("total_dropped_total=%d, want 6", payload.Diagnostics.TotalDroppedTotal)
+	}
+	if payload.Diagnostics.LastWriteDropOperation != "write_batch_fallback" {
+		t.Fatalf("last_write_drop_operation=%q, want write_batch_fallback", payload.Diagnostics.LastWriteDropOperation)
+	}
+}
+
+func TestRouterTracePipelineDiagnosticsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	handler := NewRouter(RouterOptions{
+		AppVersion: "dev",
+		Store:      &stubStore{},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/diagnostics/trace-pipeline", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusServiceUnavailable)
+	}
+	if !strings.Contains(rec.Body.String(), "trace pipeline diagnostics unavailable") {
+		t.Fatalf("body=%q, want diagnostics unavailable error", rec.Body.String())
 	}
 }
 

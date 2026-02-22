@@ -29,6 +29,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
+  /api/diagnostics/trace-pipeline:
+    get:
+      summary: Trace pipeline queue pressure and drop diagnostics
+      security:
+        - GatewayKeyAuth: []
+      responses:
+        '200':
+          description: Runtime trace pipeline diagnostics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TracePipelineDiagnosticsResponse'
+        '503':
+          $ref: '#/components/responses/ErrorResponse'
   /api/traces:
     get:
       summary: List traces
@@ -402,6 +416,69 @@ components:
           type: integer
           format: int64
       required: [status, version, uptime_sec, storage_driver, trace_count]
+    TracePipelineDiagnosticsResponse:
+      type: object
+      properties:
+        schema_version:
+          type: string
+          enum: [trace-pipeline-diagnostics.v1]
+        generated_at:
+          type: string
+          format: date-time
+        diagnostics:
+          $ref: '#/components/schemas/TracePipelineDiagnostics'
+      required: [schema_version, generated_at, diagnostics]
+    TracePipelineDiagnostics:
+      type: object
+      properties:
+        queue_capacity:
+          type: integer
+        queue_depth:
+          type: integer
+        queue_depth_high_watermark:
+          type: integer
+        queue_utilization_pct:
+          type: integer
+        queue_high_watermark_utilization_pct:
+          type: integer
+        queue_pressure_state:
+          type: string
+          enum: [ok, elevated, high, saturated]
+        queue_high_watermark_pressure_state:
+          type: string
+          enum: [ok, elevated, high, saturated]
+        enqueue_accepted_total:
+          type: integer
+          format: int64
+        enqueue_dropped_total:
+          type: integer
+          format: int64
+        write_dropped_total:
+          type: integer
+          format: int64
+        total_dropped_total:
+          type: integer
+          format: int64
+        last_enqueue_drop_at:
+          type: string
+          format: date-time
+        last_write_drop_at:
+          type: string
+          format: date-time
+        last_write_drop_operation:
+          type: string
+      required:
+        - queue_capacity
+        - queue_depth
+        - queue_depth_high_watermark
+        - queue_utilization_pct
+        - queue_high_watermark_utilization_pct
+        - queue_pressure_state
+        - queue_high_watermark_pressure_state
+        - enqueue_accepted_total
+        - enqueue_dropped_total
+        - write_dropped_total
+        - total_dropped_total
     ErrorResponse:
       type: object
       properties:

@@ -211,6 +211,9 @@ func buildTraceRecord(cfg config.Config, registry *providers.Registry, exchange 
 	if exchange.GatewayWorkspaceID != "" {
 		metadata["workspace_id"] = exchange.GatewayWorkspaceID
 	}
+	if correlationID := strings.TrimSpace(exchange.CorrelationID); correlationID != "" {
+		metadata["correlation_id"] = correlationID
+	}
 
 	metadataJSON, _ := json.Marshal(metadata)
 	timeToFirstTokenUS, timeToFirstTokenMS := normalizeTTFT(exchange.TimeToFirstTokenUS, exchange.TimeToFirstTokenMS)
