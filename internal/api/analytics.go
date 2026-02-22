@@ -70,6 +70,37 @@ type costSeriesPoint struct {
 	BucketStart  time.Time `json:"bucket_start"`
 	Group        string    `json:"group,omitempty"`
 	TotalCostUSD float64   `json:"total_cost_usd"`
+	RequestCount int64     `json:"request_count"`
+	AvgCostUSD   float64   `json:"avg_cost_usd"`
+}
+
+type latencyResponse struct {
+	GroupBy string              `json:"group_by,omitempty"`
+	Items   []latencyStatsPoint `json:"items"`
+}
+
+type latencyStatsPoint struct {
+	Group        string  `json:"group,omitempty"`
+	RequestCount int64   `json:"request_count"`
+	AvgMS        float64 `json:"avg_ms"`
+	MinMS        int64   `json:"min_ms"`
+	MaxMS        int64   `json:"max_ms"`
+	P50MS        float64 `json:"p50_ms"`
+	P95MS        float64 `json:"p95_ms"`
+	P99MS        float64 `json:"p99_ms"`
+}
+
+type errorsResponse struct {
+	GroupBy string           `json:"group_by,omitempty"`
+	Items   []errorRatePoint `json:"items"`
+}
+
+type errorRatePoint struct {
+	Group         string  `json:"group,omitempty"`
+	TotalRequests int64   `json:"total_requests"`
+	ErrorCount4xx int64   `json:"error_count_4xx"`
+	ErrorCount5xx int64   `json:"error_count_5xx"`
+	ErrorRate     float64 `json:"error_rate"`
 }
 
 func UsageHandler(store trace.TraceStore) http.Handler {
@@ -211,6 +242,74 @@ func KeysHandler(store trace.TraceStore) http.Handler {
 		}
 
 		writeJSON(w, http.StatusOK, keysResponse{Items: toKeyStatsResponse(items)})
+	})
+}
+
+func LatencyHandler(store trace.TraceStore) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "trace store is not configured")
+			return
+		}
+
+		filter, err := parseAnalyticsFilter(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		groupBy, err := parseGroupByOption(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		items, err := store.GetLatencyPercentiles(r.Context(), filter, groupBy)
+		if err != nil {
+			handleAnalyticsError(w, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, latencyResponse{
+			GroupBy: groupBy,
+			Items:   toLatencyStatsPoints(items),
+		})
+	})
+}
+
+func ErrorsHandler(store trace.TraceStore) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !requireMethod(w, r, http.MethodGet) {
+			return
+		}
+		if store == nil {
+			writeError(w, http.StatusServiceUnavailable, "trace store is not configured")
+			return
+		}
+
+		filter, err := parseAnalyticsFilter(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		groupBy, err := parseGroupByOption(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		items, err := store.GetErrorRateBreakdown(r.Context(), filter, groupBy)
+		if err != nil {
+			handleAnalyticsError(w, err)
+			return
+		}
+
+		writeJSON(w, http.StatusOK, errorsResponse{
+			GroupBy: groupBy,
+			Items:   toErrorRatePoints(items),
+		})
 	})
 }
 
@@ -420,7 +519,50 @@ func toCostSeriesPoints(items []trace.CostPoint) []costSeriesPoint {
 			BucketStart:  item.BucketStart,
 			Group:        item.Group,
 			TotalCostUSD: item.TotalCostUSD,
+			RequestCount: item.RequestCount,
+			AvgCostUSD:   item.AvgCostUSD,
 		})
 	}
 	return out
+}
+
+func toLatencyStatsPoints(items []trace.LatencyStats) []latencyStatsPoint {
+	out := make([]latencyStatsPoint, 0, len(items))
+	for _, item := range items {
+		out = append(out, latencyStatsPoint{
+			Group:        item.Group,
+			RequestCount: item.RequestCount,
+			AvgMS:        item.AvgMS,
+			MinMS:        item.MinMS,
+			MaxMS:        item.MaxMS,
+			P50MS:        item.P50MS,
+			P95MS:        item.P95MS,
+			P99MS:        item.P99MS,
+		})
+	}
+	return out
+}
+
+func toErrorRatePoints(items []trace.ErrorRateStats) []errorRatePoint {
+	out := make([]errorRatePoint, 0, len(items))
+	for _, item := range items {
+		out = append(out, errorRatePoint{
+			Group:         item.Group,
+			TotalRequests: item.TotalRequests,
+			ErrorCount4xx: item.ErrorCount4xx,
+			ErrorCount5xx: item.ErrorCount5xx,
+			ErrorRate:     item.ErrorRate,
+		})
+	}
+	return out
+}
+
+func parseGroupByOption(r *http.Request) (string, error) {
+	groupBy := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("group_by")))
+	switch groupBy {
+	case "", "provider", "model", "route", "key":
+		return groupBy, nil
+	default:
+		return "", fmt.Errorf("invalid group_by: %q", groupBy)
+	}
 }

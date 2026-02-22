@@ -43,6 +43,8 @@ func NewRouter(options RouterOptions) http.Handler {
 	mux.Handle("/api/analytics/cost", CostHandler(options.Store))
 	mux.Handle("/api/analytics/models", ModelsHandler(options.Store))
 	mux.Handle("/api/analytics/keys", KeysHandler(options.Store))
+	mux.Handle("/api/analytics/latency", LatencyHandler(options.Store))
+	mux.Handle("/api/analytics/errors", ErrorsHandler(options.Store))
 	mux.Handle("/api/analytics/summary", SummaryHandler(options.Store))
 	mux.Handle("/api/gateway-keys", GatewayKeysHandler(options.GatewayKeyStore, options.GatewayKeyAuditRecorder))
 	mux.Handle("/api/gateway-keys/", GatewayKeyDetailHandler(options.GatewayKeyStore, options.GatewayKeyAuditRecorder))

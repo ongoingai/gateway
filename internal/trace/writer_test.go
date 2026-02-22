@@ -73,6 +73,14 @@ func (s *testStore) GetKeyStats(_ context.Context, _ AnalyticsFilter) ([]KeyStat
 	return nil, ErrNotImplemented
 }
 
+func (s *testStore) GetLatencyPercentiles(_ context.Context, _ AnalyticsFilter, _ string) ([]LatencyStats, error) {
+	return nil, ErrNotImplemented
+}
+
+func (s *testStore) GetErrorRateBreakdown(_ context.Context, _ AnalyticsFilter, _ string) ([]ErrorRateStats, error) {
+	return nil, ErrNotImplemented
+}
+
 func (s *testStore) Count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

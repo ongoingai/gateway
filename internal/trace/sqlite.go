@@ -495,7 +495,9 @@ func (s *SQLiteStore) GetCostSeries(ctx context.Context, filter AnalyticsFilter,
 SELECT
 	` + bucketExpr + ` AS bucket_start,
 	` + groupExpr + ` AS group_value,
-	COALESCE(SUM(estimated_cost_usd), 0)
+	COALESCE(SUM(estimated_cost_usd), 0),
+	COUNT(*),
+	COALESCE(AVG(estimated_cost_usd), 0)
 FROM traces
 WHERE ` + whereSQL + `
 GROUP BY bucket_start, group_value
@@ -515,7 +517,7 @@ ORDER BY bucket_start ASC, group_value ASC
 			groupValue     sql.NullString
 			point          CostPoint
 		)
-		if err := rows.Scan(&bucketStartRaw, &groupValue, &point.TotalCostUSD); err != nil {
+		if err := rows.Scan(&bucketStartRaw, &groupValue, &point.TotalCostUSD, &point.RequestCount, &point.AvgCostUSD); err != nil {
 			return nil, fmt.Errorf("scan cost series row: %w", err)
 		}
 		if bucketStartRaw.Valid {
@@ -618,6 +620,157 @@ ORDER BY request_count DESC, api_key_hash ASC
 	}
 
 	return stats, nil
+}
+
+func (s *SQLiteStore) GetLatencyPercentiles(ctx context.Context, filter AnalyticsFilter, groupBy string) ([]LatencyStats, error) {
+	groupExpr, err := analyticsGroupExpression(groupBy)
+	if err != nil {
+		return nil, err
+	}
+
+	whereSQL, args := buildAnalyticsWhere(filter)
+	query := `
+SELECT ` + groupExpr + ` AS group_value, latency_ms
+FROM traces
+WHERE ` + whereSQL + `
+ORDER BY group_value ASC, latency_ms ASC
+`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query latency percentiles: %w", err)
+	}
+	defer rows.Close()
+
+	type groupData struct {
+		values []int64
+		sum    int64
+	}
+	groups := make(map[string]*groupData)
+	var order []string
+
+	for rows.Next() {
+		var (
+			groupValue sql.NullString
+			latencyMS  sql.NullInt64
+		)
+		if err := rows.Scan(&groupValue, &latencyMS); err != nil {
+			return nil, fmt.Errorf("scan latency percentile row: %w", err)
+		}
+		g := ""
+		if groupValue.Valid {
+			g = groupValue.String
+		}
+		v := int64(0)
+		if latencyMS.Valid {
+			v = latencyMS.Int64
+		}
+		gd, ok := groups[g]
+		if !ok {
+			gd = &groupData{}
+			groups[g] = gd
+			order = append(order, g)
+		}
+		gd.values = append(gd.values, v)
+		gd.sum += v
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate latency percentile rows: %w", err)
+	}
+
+	stats := make([]LatencyStats, 0, len(order))
+	for _, g := range order {
+		gd := groups[g]
+		n := int64(len(gd.values))
+		if n == 0 {
+			continue
+		}
+		minV := gd.values[0]
+		maxV := gd.values[n-1]
+		avgV := float64(gd.sum) / float64(n)
+
+		stats = append(stats, LatencyStats{
+			Group:        g,
+			RequestCount: n,
+			AvgMS:        avgV,
+			MinMS:        minV,
+			MaxMS:        maxV,
+			P50MS:        percentileFromSorted(gd.values, 0.50),
+			P95MS:        percentileFromSorted(gd.values, 0.95),
+			P99MS:        percentileFromSorted(gd.values, 0.99),
+		})
+	}
+
+	return stats, nil
+}
+
+func (s *SQLiteStore) GetErrorRateBreakdown(ctx context.Context, filter AnalyticsFilter, groupBy string) ([]ErrorRateStats, error) {
+	groupExpr, err := analyticsGroupExpression(groupBy)
+	if err != nil {
+		return nil, err
+	}
+
+	whereSQL, args := buildAnalyticsWhere(filter)
+	query := `
+SELECT ` + groupExpr + ` AS group_value,
+	COUNT(*) AS total_requests,
+	SUM(CASE WHEN response_status >= 400 AND response_status < 500 THEN 1 ELSE 0 END),
+	SUM(CASE WHEN response_status >= 500 THEN 1 ELSE 0 END)
+FROM traces
+WHERE ` + whereSQL + `
+GROUP BY group_value
+ORDER BY total_requests DESC, group_value ASC
+`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query error rate breakdown: %w", err)
+	}
+	defer rows.Close()
+
+	stats := make([]ErrorRateStats, 0)
+	for rows.Next() {
+		var (
+			groupValue sql.NullString
+			item       ErrorRateStats
+		)
+		if err := rows.Scan(&groupValue, &item.TotalRequests, &item.ErrorCount4xx, &item.ErrorCount5xx); err != nil {
+			return nil, fmt.Errorf("scan error rate row: %w", err)
+		}
+		if groupValue.Valid {
+			item.Group = groupValue.String
+		}
+		if item.TotalRequests > 0 {
+			item.ErrorRate = float64(item.ErrorCount4xx+item.ErrorCount5xx) / float64(item.TotalRequests)
+		}
+		stats = append(stats, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate error rate rows: %w", err)
+	}
+
+	return stats, nil
+}
+
+// percentileFromSorted computes a percentile from a sorted (ascending) slice
+// using linear interpolation.
+func percentileFromSorted(sorted []int64, p float64) float64 {
+	n := len(sorted)
+	if n == 0 {
+		return 0
+	}
+	if n == 1 {
+		return float64(sorted[0])
+	}
+
+	rank := p * float64(n-1)
+	lower := int(rank)
+	upper := lower + 1
+	if upper >= n {
+		return float64(sorted[n-1])
+	}
+	frac := rank - float64(lower)
+	return float64(sorted[lower]) + frac*(float64(sorted[upper])-float64(sorted[lower]))
 }
 
 func buildTraceWhere(filter TraceFilter) (string, []any, error) {
@@ -738,6 +891,23 @@ func usageGroupExpression(groupBy string) (string, error) {
 		return "provider", nil
 	case "model":
 		return "model", nil
+	default:
+		return "", fmt.Errorf("invalid group_by: %q", groupBy)
+	}
+}
+
+func analyticsGroupExpression(groupBy string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(groupBy)) {
+	case "", "none":
+		return "''", nil
+	case "provider":
+		return "provider", nil
+	case "model":
+		return "model", nil
+	case "route":
+		return "request_path", nil
+	case "key":
+		return "gateway_key_id", nil
 	default:
 		return "", fmt.Errorf("invalid group_by: %q", groupBy)
 	}

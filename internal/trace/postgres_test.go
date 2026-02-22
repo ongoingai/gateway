@@ -330,6 +330,51 @@ func TestPostgresStoreAnalyticsQueries(t *testing.T) {
 	if costSeries[1].Group != "openai" || math.Abs(costSeries[1].TotalCostUSD-0.003) > 1e-12 {
 		t.Fatalf("cost series second point=%+v", costSeries[1])
 	}
+	if costSeries[0].RequestCount != 1 {
+		t.Fatalf("cost series anthropic request_count=%d, want 1", costSeries[0].RequestCount)
+	}
+	if costSeries[1].RequestCount != 2 {
+		t.Fatalf("cost series openai request_count=%d, want 2", costSeries[1].RequestCount)
+	}
+	if math.Abs(costSeries[1].AvgCostUSD-0.0015) > 1e-12 {
+		t.Fatalf("cost series openai avg_cost=%f, want 0.0015", costSeries[1].AvgCostUSD)
+	}
+
+	// Latency percentiles
+	latencyStats, err := store.GetLatencyPercentiles(context.Background(), AnalyticsFilter{}, "provider")
+	if err != nil {
+		t.Fatalf("GetLatencyPercentiles() error: %v", err)
+	}
+	if len(latencyStats) != 2 {
+		t.Fatalf("latency stats count=%d, want 2", len(latencyStats))
+	}
+	// anthropic has 1 request (300ms), openai has 2 requests (100ms, 200ms)
+	if latencyStats[0].Group != "openai" || latencyStats[0].RequestCount != 2 {
+		t.Fatalf("first latency group=%+v, want openai with 2 requests", latencyStats[0])
+	}
+	if latencyStats[0].MinMS != 100 || latencyStats[0].MaxMS != 200 {
+		t.Fatalf("openai latency min/max=%d/%d, want 100/200", latencyStats[0].MinMS, latencyStats[0].MaxMS)
+	}
+	if latencyStats[1].Group != "anthropic" || latencyStats[1].RequestCount != 1 {
+		t.Fatalf("second latency group=%+v, want anthropic with 1 request", latencyStats[1])
+	}
+
+	// Error rate breakdown (all traces are 200 in this fixture, so no errors)
+	errorStats, err := store.GetErrorRateBreakdown(context.Background(), AnalyticsFilter{}, "provider")
+	if err != nil {
+		t.Fatalf("GetErrorRateBreakdown() error: %v", err)
+	}
+	if len(errorStats) != 2 {
+		t.Fatalf("error rate stats count=%d, want 2", len(errorStats))
+	}
+	for _, es := range errorStats {
+		if es.ErrorCount4xx != 0 || es.ErrorCount5xx != 0 {
+			t.Fatalf("error rate group=%+v, want 0 errors (all 200 status)", es)
+		}
+		if es.ErrorRate != 0 {
+			t.Fatalf("error rate=%f, want 0", es.ErrorRate)
+		}
+	}
 }
 
 func TestPostgresStoreAnalyticsQueriesTenantIsolation(t *testing.T) {
