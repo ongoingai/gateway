@@ -22,6 +22,7 @@ import (
 	"github.com/ongoingai/gateway/internal/auth"
 	"github.com/ongoingai/gateway/internal/config"
 	"github.com/ongoingai/gateway/internal/configstore"
+	"github.com/ongoingai/gateway/internal/correlation"
 	"github.com/ongoingai/gateway/internal/limits"
 	"github.com/ongoingai/gateway/internal/observability"
 	"github.com/ongoingai/gateway/internal/pathutil"
@@ -193,6 +194,14 @@ func run(args []string) int {
 		return runShellInit(args[1:], os.Stdout, os.Stderr)
 	case "wrap":
 		return runWrap(args[1:], os.Stdout, os.Stderr)
+	case "report":
+		return runReport(args[1:], os.Stdout, os.Stderr)
+	case "debug":
+		return runDebug(args[1:], os.Stdout, os.Stderr)
+	case "doctor":
+		return runDoctor(args[1:], os.Stdout, os.Stderr)
+	case "diagnostics":
+		return runDiagnostics(args[1:], os.Stdout, os.Stderr)
 	default:
 		printUsage(os.Stderr)
 		return 2
@@ -248,12 +257,8 @@ func runConfigValidate(args []string, out io.Writer, errOut io.Writer) int {
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	_, _, err := loadAndValidateConfig(*configPath)
 	if err != nil {
-		fmt.Fprintf(errOut, "config is invalid: %v\n", err)
-		return 1
-	}
-	if err := config.Validate(cfg); err != nil {
 		fmt.Fprintf(errOut, "config is invalid: %v\n", err)
 		return 1
 	}
@@ -315,13 +320,13 @@ func runServe(args []string) int {
 		return 2
 	}
 
-	cfg, err := config.Load(*configPath)
+	cfg, stage, err := loadAndValidateConfig(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
-		return 1
-	}
-	if err := config.Validate(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "config is invalid: %v\n", err)
+		if stage == configStageLoad {
+			fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "config is invalid: %v\n", err)
+		}
 		return 1
 	}
 
@@ -382,6 +387,10 @@ func runServe(args []string) int {
 		}
 	})
 	defer shutdownTraceWriter(logger, traceWriter, traceWriterShutdownTimeout)
+	var tracePipelineReader trace.TracePipelineDiagnosticsReader
+	if reader, ok := traceWriter.(trace.TracePipelineDiagnosticsReader); ok {
+		tracePipelineReader = reader
+	}
 
 	gatewayKeyStore, err := newGatewayKeyStore(cfg)
 	if err != nil {
@@ -417,6 +426,7 @@ func runServe(args []string) int {
 		Store:                   traceStore,
 		StorageDriver:           cfg.Storage.Driver,
 		StoragePath:             cfg.Storage.Path,
+		TracePipelineReader:     tracePipelineReader,
 		GatewayAuthHeader:       cfg.Auth.Header,
 		GatewayKeyStore:         gatewayKeyStore,
 		GatewayKeyAuditRecorder: gatewayKeyAuditRecorder,
@@ -442,7 +452,12 @@ func runServe(args []string) int {
 
 		traceRecord := buildTraceRecord(cfg, providerRegistry, exchange)
 		if queued := traceWriter.Enqueue(traceRecord); !queued {
-			logger.Warn("trace queue is full; dropping trace", "path", exchange.Path, "status", exchange.StatusCode)
+			logger.Warn(
+				"trace queue is full; dropping trace",
+				"correlation_id", strings.TrimSpace(exchange.CorrelationID),
+				"path", exchange.Path,
+				"status", exchange.StatusCode,
+			)
 			if otelRuntime != nil {
 				otelRuntime.RecordTraceQueueDrop(exchange.Path, exchange.StatusCode)
 			}
@@ -450,6 +465,7 @@ func runServe(args []string) int {
 
 		logger.Debug(
 			"captured exchange",
+			"correlation_id", strings.TrimSpace(exchange.CorrelationID),
 			"method", exchange.Method,
 			"path", exchange.Path,
 			"status", exchange.StatusCode,
@@ -625,6 +641,10 @@ func printUsage(out *os.File) {
 	fmt.Fprintln(out, "  ongoingai config validate [--config path/to/ongoingai.yaml]")
 	fmt.Fprintln(out, "  ongoingai shell-init [--config path/to/ongoingai.yaml]")
 	fmt.Fprintln(out, "  ongoingai wrap [--config path/to/ongoingai.yaml] -- <command> [args...]")
+	fmt.Fprintln(out, "  ongoingai report [--config path/to/ongoingai.yaml] [--format text|json] [--from RFC3339|YYYY-MM-DD] [--to RFC3339|YYYY-MM-DD] [--provider NAME] [--model NAME] [--limit N]")
+	fmt.Fprintln(out, "  ongoingai debug [last] [--config path/to/ongoingai.yaml] [--trace-id ID] [--trace-group-id ID] [--thread-id ID] [--run-id ID] [--format text|json] [--limit N] [--diff] [--bundle-out PATH] [--include-headers] [--include-bodies]")
+	fmt.Fprintln(out, "  ongoingai doctor [--config path/to/ongoingai.yaml] [--format text|json]")
+	fmt.Fprintln(out, "  ongoingai diagnostics [trace-pipeline] [--config path/to/ongoingai.yaml] [--base-url URL] [--gateway-key TOKEN] [--auth-header HEADER] [--format text|json] [--timeout DURATION]")
 }
 
 func printConfigUsage(out io.Writer) {
@@ -719,9 +739,10 @@ func newProxyAuthAuditRecorder(logger *slog.Logger) auth.AuditRecorder {
 	if logger == nil {
 		return nil
 	}
-	return func(_ *http.Request, event auth.AuditEvent) {
+	return func(req *http.Request, event auth.AuditEvent) {
 		logger.Warn(
 			"audit gateway auth deny",
+			"correlation_id", requestCorrelationID(req),
 			"audit_action", strings.TrimSpace(event.Action),
 			"audit_outcome", strings.TrimSpace(event.Outcome),
 			"audit_reason", strings.TrimSpace(event.Reason),
@@ -744,9 +765,10 @@ func newGatewayKeyAuditRecorder(logger *slog.Logger) api.GatewayKeyAuditRecorder
 	if logger == nil {
 		return nil
 	}
-	return func(_ *http.Request, event api.GatewayKeyAuditEvent) {
+	return func(req *http.Request, event api.GatewayKeyAuditEvent) {
 		logger.Info(
 			"audit gateway key lifecycle",
+			"correlation_id", requestCorrelationID(req),
 			"audit_action", strings.TrimSpace(event.Action),
 			"audit_outcome", strings.TrimSpace(event.Outcome),
 			"audit_reason", strings.TrimSpace(event.Reason),
@@ -782,6 +804,7 @@ func newGatewayKeyProxyUsageRecorder(logger *slog.Logger, usageTracker configsto
 		if err := usageTracker.TouchGatewayKeyLastUsed(ctx, keyID, filter); err != nil && logger != nil {
 			logger.Warn(
 				"failed to update gateway key last_used_at",
+				"correlation_id", requestCorrelationID(r),
 				"key_id", keyID,
 				"org_id", filter.OrgID,
 				"workspace_id", filter.WorkspaceID,
@@ -898,6 +921,16 @@ func configuredProviderSummaries(cfg config.Config) []string {
 		out = append(out, fmt.Sprintf("%s:%s->%s", provider.name, pathutil.NormalizePrefix(prefix), upstream))
 	}
 	return out
+}
+
+func requestCorrelationID(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	if id, ok := correlation.FromContext(req.Context()); ok {
+		return id
+	}
+	return correlation.FromHeaders(req.Header)
 }
 
 func shouldCaptureTrace(path string) bool {

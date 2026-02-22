@@ -1,13 +1,18 @@
 package proxy
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ongoingai/gateway/internal/correlation"
 )
 
 type scriptedWriteResponseWriter struct {
@@ -132,6 +137,85 @@ func TestBodyCaptureMiddlewareCapturesNonStreamingBodies(t *testing.T) {
 	}
 	if captured.TimeToFirstTokenUS != 0 {
 		t.Fatalf("non-stream ttft_us=%d, want 0", captured.TimeToFirstTokenUS)
+	}
+}
+
+func TestBodyCaptureMiddlewareIncludesCorrelationID(t *testing.T) {
+	t.Parallel()
+
+	var captured *CapturedExchange
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+
+	handler := BodyCaptureMiddleware(BodyCaptureOptions{
+		Enabled:     true,
+		MaxBodySize: 128,
+	}, func(exchange *CapturedExchange) {
+		captured = exchange
+	}, next)
+
+	req := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
+	req.Header.Set(correlation.HeaderName, "corr-bodycapture-1")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if captured == nil {
+		t.Fatal("capture sink was not called")
+	}
+	if captured.CorrelationID != "corr-bodycapture-1" {
+		t.Fatalf("captured correlation_id=%q, want corr-bodycapture-1", captured.CorrelationID)
+	}
+}
+
+func TestLoggingMiddlewareAssignsCorrelationIDAndLogsIt(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+
+	var seenCorrelationID string
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id, ok := correlation.FromContext(r.Context())
+		if !ok {
+			t.Fatal("expected correlation id in request context")
+		}
+		seenCorrelationID = id
+		if headerValue := r.Header.Get(correlation.HeaderName); headerValue != id {
+			t.Fatalf("request header correlation_id=%q, want %q", headerValue, id)
+		}
+		w.WriteHeader(http.StatusAccepted)
+	})
+
+	handler := LoggingMiddleware(logger, next)
+
+	req := httptest.NewRequest(http.MethodGet, "/openai/v1/models", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d, want %d", rec.Code, http.StatusAccepted)
+	}
+
+	responseCorrelationID := rec.Header().Get(correlation.HeaderName)
+	if responseCorrelationID == "" {
+		t.Fatalf("response %s header is empty", correlation.HeaderName)
+	}
+	if seenCorrelationID != responseCorrelationID {
+		t.Fatalf("context correlation_id=%q, response correlation_id=%q", seenCorrelationID, responseCorrelationID)
+	}
+
+	line := strings.TrimSpace(logs.String())
+	if line == "" {
+		t.Fatal("expected request log line")
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(line), &payload); err != nil {
+		t.Fatalf("decode log line: %v", err)
+	}
+	if payload["correlation_id"] != responseCorrelationID {
+		t.Fatalf("logged correlation_id=%v, want %q", payload["correlation_id"], responseCorrelationID)
 	}
 }
 

@@ -407,6 +407,14 @@ func TestMiddlewareAllowsAPIReadForViewerAndHealthWithoutAuth(t *testing.T) {
 		t.Fatalf("api status=%d, want %d", apiRec.Code, http.StatusOK)
 	}
 
+	diagnosticsReq := httptest.NewRequest(http.MethodGet, "/api/diagnostics/trace-pipeline", nil)
+	diagnosticsReq.Header.Set("X-OngoingAI-Gateway-Key", "viewer-token")
+	diagnosticsRec := httptest.NewRecorder()
+	handler.ServeHTTP(diagnosticsRec, diagnosticsReq)
+	if diagnosticsRec.Code != http.StatusOK {
+		t.Fatalf("diagnostics status=%d, want %d", diagnosticsRec.Code, http.StatusOK)
+	}
+
 	keysReq := httptest.NewRequest(http.MethodGet, "/api/gateway-keys", nil)
 	keysReq.Header.Set("X-OngoingAI-Gateway-Key", "viewer-token")
 	keysRec := httptest.NewRecorder()
