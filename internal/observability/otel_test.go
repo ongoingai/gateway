@@ -344,6 +344,124 @@ func TestRecordTraceWriteFailureIncludesMetricAttributes(t *testing.T) {
 	}
 }
 
+func TestRecordProviderRequestIncludesMetricAttributes(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	meter := meterProvider.Meter("test")
+	counter, err := meter.Int64Counter("test.provider.request_total")
+	if err != nil {
+		t.Fatalf("Int64Counter() error: %v", err)
+	}
+	histogram, err := meter.Float64Histogram("test.provider.request_duration_seconds")
+	if err != nil {
+		t.Fatalf("Float64Histogram() error: %v", err)
+	}
+
+	runtime := &Runtime{
+		enabled:                          true,
+		providerRequestCounter:           counter,
+		providerRequestDurationHistogram: histogram,
+	}
+
+	runtime.RecordProviderRequest("openai", "gpt-4o", 200, 1250)
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	var counterFound, histogramFound bool
+	for _, scope := range metrics.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			switch m.Name {
+			case "test.provider.request_total":
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("counter data type=%T, want metricdata.Sum[int64]", m.Data)
+				}
+				if len(sum.DataPoints) != 1 {
+					t.Fatalf("counter datapoints=%d, want 1", len(sum.DataPoints))
+				}
+				dp := sum.DataPoints[0]
+				if dp.Value != 1 {
+					t.Fatalf("counter value=%d, want 1", dp.Value)
+				}
+				gotAttrs := make(map[string]string)
+				for _, kv := range dp.Attributes.ToSlice() {
+					gotAttrs[string(kv.Key)] = kv.Value.Emit()
+				}
+				wantAttrs := map[string]string{
+					"provider":    "openai",
+					"model":       "gpt-4o",
+					"status_code": "200",
+				}
+				for key, want := range wantAttrs {
+					if got := gotAttrs[key]; got != want {
+						t.Fatalf("counter attribute %q=%q, want %q", key, got, want)
+					}
+				}
+				for key, value := range gotAttrs {
+					if _, ok := wantAttrs[key]; !ok {
+						t.Fatalf("unexpected counter attribute %q=%q", key, value)
+					}
+				}
+				counterFound = true
+
+			case "test.provider.request_duration_seconds":
+				hist, ok := m.Data.(metricdata.Histogram[float64])
+				if !ok {
+					t.Fatalf("histogram data type=%T, want metricdata.Histogram[float64]", m.Data)
+				}
+				if len(hist.DataPoints) != 1 {
+					t.Fatalf("histogram datapoints=%d, want 1", len(hist.DataPoints))
+				}
+				dp := hist.DataPoints[0]
+				if dp.Count != 1 {
+					t.Fatalf("histogram count=%d, want 1", dp.Count)
+				}
+				// 1250ms = 1.25s
+				wantSum := 1.25
+				if dp.Sum < wantSum-0.001 || dp.Sum > wantSum+0.001 {
+					t.Fatalf("histogram sum=%f, want ~%f", dp.Sum, wantSum)
+				}
+				gotAttrs := make(map[string]string)
+				for _, kv := range dp.Attributes.ToSlice() {
+					gotAttrs[string(kv.Key)] = kv.Value.Emit()
+				}
+				wantAttrs := map[string]string{
+					"provider": "openai",
+					"model":    "gpt-4o",
+				}
+				for key, want := range wantAttrs {
+					if got := gotAttrs[key]; got != want {
+						t.Fatalf("histogram attribute %q=%q, want %q", key, got, want)
+					}
+				}
+				for key, value := range gotAttrs {
+					if _, ok := wantAttrs[key]; !ok {
+						t.Fatalf("unexpected histogram attribute %q=%q", key, value)
+					}
+				}
+				histogramFound = true
+			}
+		}
+	}
+	if !counterFound {
+		t.Fatal("missing test.provider.request_total metric")
+	}
+	if !histogramFound {
+		t.Fatal("missing test.provider.request_duration_seconds metric")
+	}
+}
+
 // Cannot be parallel: mutates global OTel providers.
 //
 // The config uses Insecure: false with an http:// endpoint URL, which
@@ -528,6 +646,7 @@ func TestRuntimeGuardsDoNotPanic(t *testing.T) {
 			tt.runtime.RecordTraceWriteFailure("write_trace", 5, "unknown", "sqlite")
 			tt.runtime.RecordTraceEnqueued()
 			tt.runtime.RecordTraceFlush(10, 50*time.Millisecond)
+			tt.runtime.RecordProviderRequest("openai", "gpt-4o", 200, 1000)
 			tt.runtime.RegisterTraceQueueDepthGauge(func() int { return 0 })
 
 			if err := tt.runtime.Shutdown(context.Background()); err != nil {

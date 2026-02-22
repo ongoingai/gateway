@@ -451,6 +451,14 @@ func runServe(args []string) int {
 		}
 
 		traceRecord := buildTraceRecord(cfg, providerRegistry, exchange)
+		if otelRuntime != nil {
+			otelRuntime.RecordProviderRequest(
+				traceRecord.Provider,
+				traceRecord.Model,
+				exchange.StatusCode,
+				exchange.DurationMS,
+			)
+		}
 		if queued := traceWriter.Enqueue(traceRecord); !queued {
 			logger.Warn(
 				"trace queue is full; dropping trace",

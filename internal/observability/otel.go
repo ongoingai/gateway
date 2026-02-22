@@ -45,6 +45,9 @@ type Runtime struct {
 	traceFlushLatencyHistogram   metric.Float64Histogram
 	traceBatchSizeHistogram      metric.Int64Histogram
 
+	providerRequestCounter           metric.Int64Counter
+	providerRequestDurationHistogram metric.Float64Histogram
+
 	shutdownFns []func(context.Context) error
 }
 
@@ -174,6 +177,25 @@ func Setup(ctx context.Context, cfg config.OTelConfig, serviceVersion string, lo
 		logger.Warn("failed to create opentelemetry histogram", "metric", "ongoingai.trace.flush_batch_size", "error", metricErr)
 	}
 	runtime.traceBatchSizeHistogram = traceBatchSizeHistogram
+
+	providerRequestCounter, metricErr := meter.Int64Counter(
+		"ongoingai.provider.request_total",
+		metric.WithDescription("Count of upstream provider requests."),
+	)
+	if metricErr != nil && logger != nil {
+		logger.Warn("failed to create opentelemetry counter", "metric", "ongoingai.provider.request_total", "error", metricErr)
+	}
+	runtime.providerRequestCounter = providerRequestCounter
+
+	providerRequestDurationHistogram, metricErr := meter.Float64Histogram(
+		"ongoingai.provider.request_duration_seconds",
+		metric.WithDescription("Upstream provider request duration."),
+		metric.WithUnit("s"),
+	)
+	if metricErr != nil && logger != nil {
+		logger.Warn("failed to create opentelemetry histogram", "metric", "ongoingai.provider.request_duration_seconds", "error", metricErr)
+	}
+	runtime.providerRequestDurationHistogram = providerRequestDurationHistogram
 
 	runtime.enabled = true
 	if logger != nil {
@@ -326,6 +348,30 @@ func (r *Runtime) RecordTraceFlush(batchSize int, duration time.Duration) {
 	}
 	if r.traceFlushLatencyHistogram != nil {
 		r.traceFlushLatencyHistogram.Record(ctx, duration.Seconds())
+	}
+}
+
+// RecordProviderRequest records a single upstream provider request with its
+// status code and latency.
+func (r *Runtime) RecordProviderRequest(provider, model string, statusCode int, durationMS int64) {
+	if !r.Enabled() {
+		return
+	}
+	ctx := context.Background()
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if r.providerRequestCounter != nil {
+		r.providerRequestCounter.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("provider", provider),
+			attribute.String("model", model),
+			attribute.Int("status_code", statusCode),
+		))
+	}
+	if r.providerRequestDurationHistogram != nil {
+		r.providerRequestDurationHistogram.Record(ctx, float64(durationMS)/1000.0, metric.WithAttributes(
+			attribute.String("provider", provider),
+			attribute.String("model", model),
+		))
 	}
 }
 
