@@ -467,6 +467,15 @@ components:
           format: date-time
         last_write_drop_operation:
           type: string
+        write_failures_by_class:
+          type: object
+          description: Per-class write failure counts (only non-zero classes included).
+          additionalProperties:
+            type: integer
+            format: int64
+        store_driver:
+          type: string
+          description: Storage driver backing the trace pipeline (e.g. sqlite, postgres).
       required:
         - queue_capacity
         - queue_depth

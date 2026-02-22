@@ -10,7 +10,8 @@ import (
 const tracePipelineDiagnosticsSchemaVersion = "trace-pipeline-diagnostics.v1"
 
 type TracePipelineDiagnosticsOptions struct {
-	Reader trace.TracePipelineDiagnosticsReader
+	Reader      trace.TracePipelineDiagnosticsReader
+	StoreDriver string
 }
 
 type tracePipelineDiagnosticsResponse struct {
@@ -29,10 +30,14 @@ func TracePipelineDiagnosticsHandler(options TracePipelineDiagnosticsOptions) ht
 			return
 		}
 
+		diagnostics := options.Reader.TracePipelineDiagnostics()
+		if options.StoreDriver != "" {
+			diagnostics.StoreDriver = options.StoreDriver
+		}
 		writeJSON(w, http.StatusOK, tracePipelineDiagnosticsResponse{
 			SchemaVersion: tracePipelineDiagnosticsSchemaVersion,
 			GeneratedAt:   time.Now().UTC(),
-			Diagnostics:   options.Reader.TracePipelineDiagnostics(),
+			Diagnostics:   diagnostics,
 		})
 	})
 }

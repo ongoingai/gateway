@@ -967,6 +967,53 @@ func TestRouterTracePipelineDiagnostics(t *testing.T) {
 	}
 }
 
+func TestRouterTracePipelineDiagnosticsIncludesWriteFailuresAndStoreDriver(t *testing.T) {
+	t.Parallel()
+
+	handler := NewRouter(RouterOptions{
+		AppVersion:    "dev",
+		Store:         &stubStore{},
+		StorageDriver: "postgres",
+		TracePipelineReader: &stubTracePipelineDiagnosticsReader{
+			snapshot: trace.TracePipelineDiagnostics{
+				QueueCapacity:      1024,
+				QueueDepth:         0,
+				QueuePressureState: trace.TraceQueuePressureOK,
+				WriteDroppedTotal:  5,
+				TotalDroppedTotal:  5,
+				WriteFailuresByClass: map[string]int64{
+					"connection": 3,
+					"timeout":    2,
+				},
+			},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/diagnostics/trace-pipeline", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rec.Code)
+	}
+
+	var payload tracePipelineDiagnosticsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Diagnostics.StoreDriver != "postgres" {
+		t.Fatalf("store_driver=%q, want postgres", payload.Diagnostics.StoreDriver)
+	}
+	if payload.Diagnostics.WriteFailuresByClass == nil {
+		t.Fatal("write_failures_by_class should be populated")
+	}
+	if payload.Diagnostics.WriteFailuresByClass["connection"] != 3 {
+		t.Fatalf("connection=%d, want 3", payload.Diagnostics.WriteFailuresByClass["connection"])
+	}
+	if payload.Diagnostics.WriteFailuresByClass["timeout"] != 2 {
+		t.Fatalf("timeout=%d, want 2", payload.Diagnostics.WriteFailuresByClass["timeout"])
+	}
+}
+
 func TestRouterTracePipelineDiagnosticsUnavailable(t *testing.T) {
 	t.Parallel()
 

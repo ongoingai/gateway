@@ -241,5 +241,31 @@ func writeTracePipelineDiagnosticsText(out io.Writer, document tracePipelineDiag
 	fmt.Fprintf(drops, "Last enqueue drop at\t%s\n", timePtrOr(document.Diagnostics.LastEnqueueDropAt, "(none)"))
 	fmt.Fprintf(drops, "Last write drop at\t%s\n", timePtrOr(document.Diagnostics.LastWriteDropAt, "(none)"))
 	fmt.Fprintf(drops, "Last write drop operation\t%s\n", valueOr(document.Diagnostics.LastWriteDropOperation, "(none)"))
-	return drops.Flush()
+	if err := drops.Flush(); err != nil {
+		return err
+	}
+
+	if len(document.Diagnostics.WriteFailuresByClass) > 0 {
+		fmt.Fprintln(out, "\nWrite Failures by Class")
+		failures := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		for _, class := range []string{"connection", "timeout", "contention", "constraint", "unknown"} {
+			if count, ok := document.Diagnostics.WriteFailuresByClass[class]; ok {
+				fmt.Fprintf(failures, "%s\t%d\n", class, count)
+			}
+		}
+		if err := failures.Flush(); err != nil {
+			return err
+		}
+	}
+
+	if document.Diagnostics.StoreDriver != "" {
+		fmt.Fprintln(out, "\nStore")
+		store := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		fmt.Fprintf(store, "Driver\t%s\n", document.Diagnostics.StoreDriver)
+		if err := store.Flush(); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

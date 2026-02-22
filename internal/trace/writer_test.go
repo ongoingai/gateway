@@ -641,6 +641,82 @@ func TestWriterQueueLen(t *testing.T) {
 	writer.Stop()
 }
 
+func TestWriterTracePipelineDiagnosticsTracksWriteFailuresByClass(t *testing.T) {
+	t.Parallel()
+
+	writer := NewWriter(&testStore{}, 8)
+
+	// Simulate classified failures directly to test per-class counter logic
+	// independent of batch grouping behavior.
+	writer.reportWriteFailure(WriteFailure{
+		Operation:   "write_trace",
+		BatchSize:   1,
+		FailedCount: 1,
+		Err:         errors.New("database is locked"),
+	})
+	writer.reportWriteFailure(WriteFailure{
+		Operation:   "write_trace",
+		BatchSize:   1,
+		FailedCount: 1,
+		Err:         errors.New("duplicate key value"),
+	})
+	writer.reportWriteFailure(WriteFailure{
+		Operation:   "write_trace",
+		BatchSize:   1,
+		FailedCount: 2,
+		Err:         errors.New("dial tcp 127.0.0.1: connection refused"),
+	})
+
+	snapshot := writer.TracePipelineDiagnostics()
+	if snapshot.WriteDroppedTotal != 4 {
+		t.Fatalf("write_dropped_total=%d, want 4", snapshot.WriteDroppedTotal)
+	}
+	if snapshot.WriteFailuresByClass == nil {
+		t.Fatal("write_failures_by_class should be populated")
+	}
+	if snapshot.WriteFailuresByClass[WriteErrorClassContention] != 1 {
+		t.Fatalf("contention=%d, want 1", snapshot.WriteFailuresByClass[WriteErrorClassContention])
+	}
+	if snapshot.WriteFailuresByClass[WriteErrorClassConstraint] != 1 {
+		t.Fatalf("constraint=%d, want 1", snapshot.WriteFailuresByClass[WriteErrorClassConstraint])
+	}
+	if snapshot.WriteFailuresByClass[WriteErrorClassConnection] != 2 {
+		t.Fatalf("connection=%d, want 2", snapshot.WriteFailuresByClass[WriteErrorClassConnection])
+	}
+	if _, ok := snapshot.WriteFailuresByClass[WriteErrorClassUnknown]; ok {
+		t.Fatalf("unknown should not be present, got %d", snapshot.WriteFailuresByClass[WriteErrorClassUnknown])
+	}
+}
+
+func TestWriterWriteFailureIncludesErrorClass(t *testing.T) {
+	t.Parallel()
+
+	store := &flakyStore{failFirst: 1}
+	writer := NewWriter(store, 8)
+	writeFailures := make(chan WriteFailure, 4)
+	writer.SetWriteFailureHandler(func(failure WriteFailure) {
+		writeFailures <- failure
+	})
+	writer.Start(context.Background())
+
+	if !writer.Enqueue(&Trace{ID: "trace"}) {
+		t.Fatal("enqueue failed")
+	}
+	writer.Stop()
+
+	select {
+	case failure := <-writeFailures:
+		if failure.ErrorClass == "" {
+			t.Fatal("ErrorClass should be populated")
+		}
+		if failure.ErrorClass != WriteErrorClassUnknown {
+			t.Fatalf("ErrorClass=%q, want %q", failure.ErrorClass, WriteErrorClassUnknown)
+		}
+	default:
+		t.Fatal("expected at least one write failure signal")
+	}
+}
+
 func TestWriterStopIsIdempotentWithoutStart(t *testing.T) {
 	t.Parallel()
 

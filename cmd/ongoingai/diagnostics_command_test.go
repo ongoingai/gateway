@@ -35,6 +35,10 @@ func TestRunDiagnosticsJSONOutput(t *testing.T) {
 			LastEnqueueDropAt:                &lastQueueDrop,
 			LastWriteDropAt:                  &lastWriteDrop,
 			LastWriteDropOperation:           "write_batch_fallback",
+			WriteFailuresByClass: map[string]int64{
+				"contention": 1,
+			},
+			StoreDriver: "sqlite",
 		},
 	}
 
@@ -71,6 +75,15 @@ func TestRunDiagnosticsJSONOutput(t *testing.T) {
 	if payload.Diagnostics.LastWriteDropOperation != "write_batch_fallback" {
 		t.Fatalf("last_write_drop_operation=%q, want write_batch_fallback", payload.Diagnostics.LastWriteDropOperation)
 	}
+	if payload.Diagnostics.WriteFailuresByClass == nil {
+		t.Fatal("write_failures_by_class should be populated")
+	}
+	if payload.Diagnostics.WriteFailuresByClass["contention"] != 1 {
+		t.Fatalf("contention=%d, want 1", payload.Diagnostics.WriteFailuresByClass["contention"])
+	}
+	if payload.Diagnostics.StoreDriver != "sqlite" {
+		t.Fatalf("store_driver=%q, want sqlite", payload.Diagnostics.StoreDriver)
+	}
 }
 
 func TestRunDiagnosticsTextOutput(t *testing.T) {
@@ -91,6 +104,11 @@ func TestRunDiagnosticsTextOutput(t *testing.T) {
 			EnqueueDroppedTotal:              7,
 			WriteDroppedTotal:                5,
 			TotalDroppedTotal:                12,
+			WriteFailuresByClass: map[string]int64{
+				"connection": 3,
+				"timeout":    2,
+			},
+			StoreDriver: "sqlite",
 		},
 	}
 
@@ -120,6 +138,18 @@ func TestRunDiagnosticsTextOutput(t *testing.T) {
 	}
 	if !strings.Contains(body, "Total dropped") || !strings.Contains(body, "12") {
 		t.Fatalf("stdout=%q, want dropped trace totals", body)
+	}
+	if !strings.Contains(body, "Write Failures by Class") {
+		t.Fatalf("stdout=%q, want Write Failures by Class section", body)
+	}
+	if !strings.Contains(body, "connection") || !strings.Contains(body, "3") {
+		t.Fatalf("stdout=%q, want connection failure count", body)
+	}
+	if !strings.Contains(body, "timeout") || !strings.Contains(body, "2") {
+		t.Fatalf("stdout=%q, want timeout failure count", body)
+	}
+	if !strings.Contains(body, "Store") || !strings.Contains(body, "sqlite") {
+		t.Fatalf("stdout=%q, want Store driver section", body)
 	}
 }
 

@@ -35,9 +35,11 @@ type TracePipelineDiagnostics struct {
 	EnqueueDroppedTotal              int64      `json:"enqueue_dropped_total"`
 	WriteDroppedTotal                int64      `json:"write_dropped_total"`
 	TotalDroppedTotal                int64      `json:"total_dropped_total"`
-	LastEnqueueDropAt                *time.Time `json:"last_enqueue_drop_at,omitempty"`
-	LastWriteDropAt                  *time.Time `json:"last_write_drop_at,omitempty"`
-	LastWriteDropOperation           string     `json:"last_write_drop_operation,omitempty"`
+	LastEnqueueDropAt                *time.Time        `json:"last_enqueue_drop_at,omitempty"`
+	LastWriteDropAt                  *time.Time        `json:"last_write_drop_at,omitempty"`
+	LastWriteDropOperation           string            `json:"last_write_drop_operation,omitempty"`
+	WriteFailuresByClass             map[string]int64  `json:"write_failures_by_class,omitempty"`
+	StoreDriver                      string            `json:"store_driver,omitempty"`
 }
 
 // WriteFailure describes trace records that could not be persisted.
@@ -46,6 +48,7 @@ type WriteFailure struct {
 	BatchSize   int
 	FailedCount int
 	Err         error
+	ErrorClass  string
 }
 
 // WriteFailureHandler receives asynchronous trace write failure signals.
@@ -86,6 +89,12 @@ type Writer struct {
 	lastEnqueueDropUnixNano atomic.Int64
 	lastWriteDropUnixNano   atomic.Int64
 	lastWriteDropOperation  atomic.Value // string
+
+	writeFailureConnection atomic.Int64
+	writeFailureTimeout    atomic.Int64
+	writeFailureContention atomic.Int64
+	writeFailureConstraint atomic.Int64
+	writeFailureUnknown    atomic.Int64
 }
 
 func NewWriter(store TraceStore, bufferSize int) *Writer {
@@ -275,10 +284,24 @@ func (w *Writer) reportWriteFailure(failure WriteFailure) {
 	if w == nil || failure.FailedCount <= 0 {
 		return
 	}
+	failure.ErrorClass = ClassifyWriteError(failure.Err)
 	w.writeDroppedTotal.Add(int64(failure.FailedCount))
 	w.lastWriteDropUnixNano.Store(time.Now().UTC().UnixNano())
 	if failure.Operation != "" {
 		w.lastWriteDropOperation.Store(failure.Operation)
+	}
+	count := int64(failure.FailedCount)
+	switch failure.ErrorClass {
+	case WriteErrorClassConnection:
+		w.writeFailureConnection.Add(count)
+	case WriteErrorClassTimeout:
+		w.writeFailureTimeout.Add(count)
+	case WriteErrorClassContention:
+		w.writeFailureContention.Add(count)
+	case WriteErrorClassConstraint:
+		w.writeFailureConstraint.Add(count)
+	default:
+		w.writeFailureUnknown.Add(count)
 	}
 	handler, ok := w.writeFailureHandle.Load().(WriteFailureHandler)
 	if !ok || handler == nil {
@@ -332,6 +355,27 @@ func (w *Writer) TracePipelineDiagnostics() TracePipelineDiagnostics {
 	if operation, ok := w.lastWriteDropOperation.Load().(string); ok {
 		snapshot.LastWriteDropOperation = operation
 	}
+
+	byClass := make(map[string]int64)
+	if v := w.writeFailureConnection.Load(); v > 0 {
+		byClass[WriteErrorClassConnection] = v
+	}
+	if v := w.writeFailureTimeout.Load(); v > 0 {
+		byClass[WriteErrorClassTimeout] = v
+	}
+	if v := w.writeFailureContention.Load(); v > 0 {
+		byClass[WriteErrorClassContention] = v
+	}
+	if v := w.writeFailureConstraint.Load(); v > 0 {
+		byClass[WriteErrorClassConstraint] = v
+	}
+	if v := w.writeFailureUnknown.Load(); v > 0 {
+		byClass[WriteErrorClassUnknown] = v
+	}
+	if len(byClass) > 0 {
+		snapshot.WriteFailuresByClass = byClass
+	}
+
 	return snapshot
 }
 

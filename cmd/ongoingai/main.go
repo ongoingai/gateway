@@ -383,7 +383,7 @@ func runServe(args []string) int {
 	attachTraceWriterMetrics(traceWriter, otelRuntime)
 	attachTraceWriterFailureLogging(logger, traceWriter, func(failure trace.WriteFailure) {
 		if otelRuntime != nil {
-			otelRuntime.RecordTraceWriteFailure(failure.Operation, failure.FailedCount)
+			otelRuntime.RecordTraceWriteFailure(failure.Operation, failure.FailedCount, failure.ErrorClass, cfg.Storage.Driver)
 		}
 	})
 	defer shutdownTraceWriter(logger, traceWriter, traceWriterShutdownTimeout)
@@ -882,6 +882,7 @@ func attachTraceWriterFailureLogging(logger *slog.Logger, writer asyncTraceWrite
 			"operation", strings.TrimSpace(failure.Operation),
 			"batch_size", failure.BatchSize,
 			"failed_count", failure.FailedCount,
+			"error_class", failure.ErrorClass,
 			"error_kind", fmt.Sprintf("%T", failure.Err),
 		)
 	})

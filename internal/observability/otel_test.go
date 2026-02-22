@@ -321,7 +321,7 @@ func TestSetupExportsTracesAndMetrics(t *testing.T) {
 	_, span := otel.Tracer("test").Start(context.Background(), "gateway.test")
 	span.End()
 	runtime.RecordTraceQueueDrop("/openai/v1/chat/completions", http.StatusBadGateway)
-	runtime.RecordTraceWriteFailure("write_trace", 2)
+	runtime.RecordTraceWriteFailure("write_trace", 2, "unknown", "sqlite")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -449,7 +449,7 @@ func TestRuntimeGuardsDoNotPanic(t *testing.T) {
 			}
 
 			tt.runtime.RecordTraceQueueDrop("/openai/v1/chat", 502)
-			tt.runtime.RecordTraceWriteFailure("write_trace", 5)
+			tt.runtime.RecordTraceWriteFailure("write_trace", 5, "unknown", "sqlite")
 			tt.runtime.RecordTraceEnqueued()
 			tt.runtime.RecordTraceFlush(10, 50*time.Millisecond)
 			tt.runtime.RegisterTraceQueueDepthGauge(func() int { return 0 })

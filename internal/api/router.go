@@ -34,7 +34,8 @@ func NewRouter(options RouterOptions) http.Handler {
 		Store:         options.Store,
 	}))
 	mux.Handle("/api/diagnostics/trace-pipeline", TracePipelineDiagnosticsHandler(TracePipelineDiagnosticsOptions{
-		Reader: options.TracePipelineReader,
+		Reader:      options.TracePipelineReader,
+		StoreDriver: options.StorageDriver,
 	}))
 	mux.Handle("/api/traces", TracesHandler(options.Store))
 	mux.Handle("/api/traces/", TraceDetailHandler(options.Store))

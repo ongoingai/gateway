@@ -292,14 +292,18 @@ func (r *Runtime) RecordTraceQueueDrop(path string, status int) {
 }
 
 // RecordTraceWriteFailure increments a counter for dropped trace records.
-func (r *Runtime) RecordTraceWriteFailure(operation string, failedCount int) {
+func (r *Runtime) RecordTraceWriteFailure(operation string, failedCount int, errorClass string, store string) {
 	if !r.Enabled() || failedCount <= 0 || r.traceWriteFailedCounter == nil {
 		return
 	}
 	r.traceWriteFailedCounter.Add(
 		context.Background(),
 		int64(failedCount),
-		metric.WithAttributes(attribute.String("operation", strings.TrimSpace(operation))),
+		metric.WithAttributes(
+			attribute.String("operation", strings.TrimSpace(operation)),
+			attribute.String("error_class", strings.TrimSpace(errorClass)),
+			attribute.String("store", strings.TrimSpace(store)),
+		),
 	)
 }
 
