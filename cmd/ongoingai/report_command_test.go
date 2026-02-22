@@ -62,6 +62,9 @@ func TestRunReportJSONOutput(t *testing.T) {
 	if report.Filters.Limit != 5 {
 		t.Fatalf("filters.limit=%d, want 5", report.Filters.Limit)
 	}
+	if report.Filters.From != nil || report.Filters.To != nil {
+		t.Fatalf("filters from/to should be omitted when unset, got from=%v to=%v", report.Filters.From, report.Filters.To)
+	}
 
 	if report.Summary.TotalRequests != 4 {
 		t.Fatalf("total_requests=%d, want 4", report.Summary.TotalRequests)
@@ -92,6 +95,33 @@ func TestRunReportJSONOutput(t *testing.T) {
 	}
 	if report.Recent[0].ID != "trace-anthropic-2" || report.Recent[1].ID != "trace-anthropic-1" {
 		t.Fatalf("recent ordering=%+v, want deterministic id tie-break order for equal timestamps", report.Recent)
+	}
+}
+
+func TestRunReportJSONOutputIncludesExplicitTimeFilters(t *testing.T) {
+	t.Parallel()
+
+	configPath := writeReportTestFixture(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	code := runReport([]string{"--config", configPath, "--format", "json", "--from", "2026-02-18", "--to", "2026-02-18", "--limit", "5"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("runReport() code=%d, stderr=%q", code, stderr.String())
+	}
+
+	var report reportDocument
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("decode json report: %v\nbody=%s", err, stdout.String())
+	}
+	if report.Filters.From == nil || report.Filters.To == nil {
+		t.Fatalf("filters from/to should be set when explicit range is passed, got from=%v to=%v", report.Filters.From, report.Filters.To)
+	}
+	if got, want := report.Filters.From.UTC().Format(time.RFC3339Nano), "2026-02-18T00:00:00Z"; got != want {
+		t.Fatalf("filters.from=%q, want %q", got, want)
+	}
+	if got, want := report.Filters.To.UTC().Format(time.RFC3339Nano), "2026-02-18T23:59:59.999999999Z"; got != want {
+		t.Fatalf("filters.to=%q, want %q", got, want)
 	}
 }
 

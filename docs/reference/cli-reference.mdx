@@ -236,6 +236,7 @@ Behavior:
 - Queries usage, cost, models, key stats, provider breakdown, and recent traces.
 - Prints a report without requiring the HTTP server.
 - JSON output includes stable `schema_version: "report.v1"` for scripting contracts and echoes selected filters (including `limit`).
+- Optional time filters are cleaner: `filters.from` and `filters.to` are omitted unless explicitly set via `--from` / `--to`.
 - JSON arrays are deterministic: providers sorted by token volume, models by request count then model name, API keys by request count then hash, and recent traces by timestamp/id.
 
 Exit codes:

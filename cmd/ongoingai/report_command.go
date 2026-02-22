@@ -41,11 +41,11 @@ type reportStorageInfo struct {
 }
 
 type reportFilterInfo struct {
-	Provider string    `json:"provider,omitempty"`
-	Model    string    `json:"model,omitempty"`
-	From     time.Time `json:"from,omitempty"`
-	To       time.Time `json:"to,omitempty"`
-	Limit    int       `json:"limit"`
+	Provider string     `json:"provider,omitempty"`
+	Model    string     `json:"model,omitempty"`
+	From     *time.Time `json:"from,omitempty"`
+	To       *time.Time `json:"to,omitempty"`
+	Limit    int        `json:"limit"`
 }
 
 type reportSummaryInfo struct {
@@ -389,8 +389,8 @@ func buildReport(
 		Filters: reportFilterInfo{
 			Provider: analyticsFilter.Provider,
 			Model:    analyticsFilter.Model,
-			From:     analyticsFilter.From,
-			To:       analyticsFilter.To,
+			From:     reportOptionalTime(analyticsFilter.From),
+			To:       reportOptionalTime(analyticsFilter.To),
 			Limit:    traceFilter.Limit,
 		},
 		Summary: reportSummaryInfo{
@@ -514,8 +514,8 @@ func writeReportText(out io.Writer, report reportDocument) error {
 	}
 	fmt.Fprintf(metadataWriter, "Filter provider\t%s\n", reportValueOr(report.Filters.Provider, "(all)"))
 	fmt.Fprintf(metadataWriter, "Filter model\t%s\n", reportValueOr(report.Filters.Model, "(all)"))
-	fmt.Fprintf(metadataWriter, "Filter from\t%s\n", reportTimeOr(report.Filters.From, "(all)"))
-	fmt.Fprintf(metadataWriter, "Filter to\t%s\n", reportTimeOr(report.Filters.To, "(all)"))
+	fmt.Fprintf(metadataWriter, "Filter from\t%s\n", reportTimePtrOr(report.Filters.From, "(all)"))
+	fmt.Fprintf(metadataWriter, "Filter to\t%s\n", reportTimePtrOr(report.Filters.To, "(all)"))
 	fmt.Fprintf(metadataWriter, "Filter limit\t%d\n", report.Filters.Limit)
 	if err := metadataWriter.Flush(); err != nil {
 		return err
@@ -619,6 +619,21 @@ func reportValueOr(value string, fallback string) string {
 
 func reportTimeOr(value time.Time, fallback string) string {
 	if value.IsZero() {
+		return fallback
+	}
+	return value.UTC().Format(time.RFC3339)
+}
+
+func reportOptionalTime(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	utc := value.UTC()
+	return &utc
+}
+
+func reportTimePtrOr(value *time.Time, fallback string) string {
+	if value == nil || value.IsZero() {
 		return fallback
 	}
 	return value.UTC().Format(time.RFC3339)
