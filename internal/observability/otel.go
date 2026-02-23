@@ -20,6 +20,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -37,6 +38,13 @@ import (
 const (
 	instrumentationName = "ongoingai.gateway"
 	telemetryUnknown    = "unknown"
+)
+
+var (
+	// proxyLatencyBuckets covers typical AI API response times (5ms–10s).
+	proxyLatencyBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0}
+	// traceFlushLatencyBuckets covers fast database writes (1ms–1s).
+	traceFlushLatencyBuckets = []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0}
 )
 
 // telemetryScope is the normalized request-scope dimension set used across
@@ -195,6 +203,22 @@ func Setup(ctx context.Context, cfg config.OTelConfig, serviceVersion string, lo
 	var meterOpts []sdkmetric.Option
 	meterOpts = append(meterOpts, sdkmetric.WithResource(res))
 
+	// Custom histogram bucket boundaries for proxy and trace-flush latencies.
+	meterOpts = append(meterOpts,
+		sdkmetric.WithView(sdkmetric.NewView(
+			sdkmetric.Instrument{Name: "ongoingai.proxy.request_duration_seconds"},
+			sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: proxyLatencyBuckets}},
+		)),
+		sdkmetric.WithView(sdkmetric.NewView(
+			sdkmetric.Instrument{Name: "ongoingai.provider.request_duration_seconds"},
+			sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: proxyLatencyBuckets}},
+		)),
+		sdkmetric.WithView(sdkmetric.NewView(
+			sdkmetric.Instrument{Name: "ongoingai.trace.flush_duration_seconds"},
+			sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: traceFlushLatencyBuckets}},
+		)),
+	)
+
 	if cfg.MetricsEnabled {
 		metricExporterOptions := []otlpmetrichttp.Option{
 			otlpmetrichttp.WithEndpoint(otlpEndpoint),
@@ -232,6 +256,12 @@ func Setup(ctx context.Context, cfg config.OTelConfig, serviceVersion string, lo
 		meterProvider := sdkmetric.NewMeterProvider(meterOpts...)
 		otel.SetMeterProvider(meterProvider)
 		runtime.shutdownFns = append(runtime.shutdownFns, meterProvider.Shutdown)
+
+		if err := otelruntime.Start(otelruntime.WithMeterProvider(meterProvider)); err != nil {
+			if logger != nil {
+				logger.Warn("failed to start go runtime metrics", "error", err)
+			}
+		}
 	}
 
 	otel.SetTextMapPropagator(propagation.TraceContext{})

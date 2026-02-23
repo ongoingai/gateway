@@ -334,7 +334,9 @@ func runServe(args []string) int {
 		return 1
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(observability.NewTraceLogHandler(
+		slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}),
+	))
 	otelRuntime, otelErr := observability.Setup(context.Background(), cfg.Observability.OTel, version.String(), logger)
 	if otelErr != nil {
 		logger.Error("failed to initialize opentelemetry; continuing with instrumentation disabled", "error", otelErr)
@@ -495,7 +497,7 @@ func runServe(args []string) int {
 		endEnqueueSpan(queued)
 
 		if !queued {
-			logger.Warn(
+			logger.WarnContext(enqueueCtx,
 				"trace queue is full; dropping trace",
 				"correlation_id", strings.TrimSpace(exchange.CorrelationID),
 				"path", exchange.Path,
@@ -513,7 +515,7 @@ func runServe(args []string) int {
 			}
 		}
 
-		logger.Debug(
+		logger.DebugContext(enqueueCtx,
 			"captured exchange",
 			"correlation_id", strings.TrimSpace(exchange.CorrelationID),
 			"method", exchange.Method,
@@ -807,7 +809,7 @@ func newProxyAuthAuditRecorder(logger *slog.Logger) auth.AuditRecorder {
 		return nil
 	}
 	return func(req *http.Request, event auth.AuditEvent) {
-		logger.Warn(
+		logger.WarnContext(req.Context(),
 			"audit gateway auth deny",
 			"correlation_id", requestCorrelationID(req),
 			"audit_action", strings.TrimSpace(event.Action),

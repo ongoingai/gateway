@@ -1874,6 +1874,179 @@ func TestOtelHTTPDoesNotCaptureAuthHeaders(t *testing.T) {
 	}
 }
 
+// Cannot be parallel: mutates global OTel providers.
+func TestSetupRegistersRuntimeMetrics(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	oldMP := otel.GetMeterProvider()
+	oldProp := otel.GetTextMapPropagator()
+	defer func() {
+		otel.SetTracerProvider(oldTP)
+		otel.SetMeterProvider(oldMP)
+		otel.SetTextMapPropagator(oldProp)
+	}()
+
+	runtime, err := Setup(context.Background(), config.OTelConfig{
+		Enabled:                true,
+		Endpoint:               "localhost:4318",
+		ServiceName:            "test-runtime-metrics",
+		TracesEnabled:          false,
+		MetricsEnabled:         false,
+		PrometheusEnabled:      true,
+		SamplingRatio:          1.0,
+		ExportTimeoutMS:        1000,
+		MetricExportIntervalMS: 10000,
+	}, "test", nil)
+	if err != nil {
+		t.Fatalf("Setup() error: %v", err)
+	}
+	defer func() { _ = runtime.Shutdown(context.Background()) }()
+
+	handler := runtime.PrometheusHandler()
+	if handler == nil {
+		t.Fatal("PrometheusHandler() returned nil")
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+
+	// Look for at least one Go runtime metric in Prometheus output.
+	// The contrib/instrumentation/runtime package emits metrics like
+	// go_memory_classes_heap_objects_bytes, go_goroutine_count, etc.
+	found := false
+	for _, substr := range []string{"go_memory", "go_goroutine", "go_gc", "go_sched"} {
+		if strings.Contains(body, substr) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Logf("prometheus body (first 2000 chars): %s", body[:min(len(body), 2000)])
+		t.Fatal("expected at least one Go runtime metric in Prometheus output")
+	}
+}
+
+// Cannot be parallel: mutates global OTel providers.
+func TestSetupDisabledSkipsRuntimeMetrics(t *testing.T) {
+	runtime, err := Setup(context.Background(), config.OTelConfig{Enabled: false}, "test", nil)
+	if err != nil {
+		t.Fatalf("Setup() error: %v", err)
+	}
+	if runtime.Enabled() {
+		t.Fatal("expected Enabled()=false for disabled config")
+	}
+	// No metrics should be registered — runtime itself should be noop.
+}
+
+func TestCustomHistogramBucketsProxy(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(reader),
+		sdkmetric.WithView(sdkmetric.NewView(
+			sdkmetric.Instrument{Name: "ongoingai.proxy.request_duration_seconds"},
+			sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: proxyLatencyBuckets}},
+		)),
+	)
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	histogram, err := meterProvider.Meter("test").Float64Histogram("ongoingai.proxy.request_duration_seconds")
+	if err != nil {
+		t.Fatalf("Float64Histogram() error: %v", err)
+	}
+	histogram.Record(context.Background(), 0.042)
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	for _, scope := range metrics.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "ongoingai.proxy.request_duration_seconds" {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				t.Fatalf("data type=%T, want Histogram[float64]", m.Data)
+			}
+			if len(hist.DataPoints) != 1 {
+				t.Fatalf("datapoints=%d, want 1", len(hist.DataPoints))
+			}
+			bounds := hist.DataPoints[0].Bounds
+			if len(bounds) != len(proxyLatencyBuckets) {
+				t.Fatalf("bounds=%d, want %d", len(bounds), len(proxyLatencyBuckets))
+			}
+			for i, b := range bounds {
+				if b != proxyLatencyBuckets[i] {
+					t.Fatalf("bounds[%d]=%f, want %f", i, b, proxyLatencyBuckets[i])
+				}
+			}
+			return
+		}
+	}
+	t.Fatal("missing ongoingai.proxy.request_duration_seconds metric")
+}
+
+func TestCustomHistogramBucketsFlush(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(reader),
+		sdkmetric.WithView(sdkmetric.NewView(
+			sdkmetric.Instrument{Name: "ongoingai.trace.flush_duration_seconds"},
+			sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: traceFlushLatencyBuckets}},
+		)),
+	)
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	histogram, err := meterProvider.Meter("test").Float64Histogram("ongoingai.trace.flush_duration_seconds")
+	if err != nil {
+		t.Fatalf("Float64Histogram() error: %v", err)
+	}
+	histogram.Record(context.Background(), 0.008)
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	for _, scope := range metrics.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "ongoingai.trace.flush_duration_seconds" {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				t.Fatalf("data type=%T, want Histogram[float64]", m.Data)
+			}
+			if len(hist.DataPoints) != 1 {
+				t.Fatalf("datapoints=%d, want 1", len(hist.DataPoints))
+			}
+			bounds := hist.DataPoints[0].Bounds
+			if len(bounds) != len(traceFlushLatencyBuckets) {
+				t.Fatalf("bounds=%d, want %d", len(bounds), len(traceFlushLatencyBuckets))
+			}
+			for i, b := range bounds {
+				if b != traceFlushLatencyBuckets[i] {
+					t.Fatalf("bounds[%d]=%f, want %f", i, b, traceFlushLatencyBuckets[i])
+				}
+			}
+			return
+		}
+	}
+	t.Fatal("missing ongoingai.trace.flush_duration_seconds metric")
+}
+
 func spanAttrMap(span sdktrace.ReadOnlySpan) map[string]string {
 	attrs := make(map[string]string)
 	for _, a := range span.Attributes() {
