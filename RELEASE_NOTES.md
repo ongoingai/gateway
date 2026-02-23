@@ -74,17 +74,29 @@ Headless AI gateway runtime and APIs. No web UI in this repository.
 - Per-stage controls for request headers, request body, response headers, and
   response body redaction.
 
-### OpenTelemetry
+### OpenTelemetry and Prometheus
 
 - OTLP HTTP export for distributed traces and gateway metrics.
-- Inbound server spans and upstream proxy client spans with route-pattern naming.
+- Native Prometheus `/metrics` scrape endpoint with dual-export support
+  (Prometheus and OTLP push can run simultaneously).
+- 12 metric instruments across trace pipeline, provider, and proxy dimensions.
+- Custom histogram bucket boundaries optimized for AI API latencies (5ms-10s)
+  and storage writes (1ms-1s).
+- Histogram exemplars on proxy and provider latency metrics for
+  metrics-to-traces correlation (click a latency spike, open the trace).
+- 6 span types: inbound server, upstream proxy client, auth evaluation,
+  provider routing, trace enqueue, and trace write.
 - Tenant identity attributes on spans: `gateway.org_id`, `gateway.workspace_id`,
   `gateway.key_id`, `gateway.role`.
+- Logs-to-traces correlation: structured JSON logs include `trace_id` and
+  `span_id` from the active request span.
 - W3C Trace Context propagation.
 - Configurable sampling ratio with parent-based sampling.
-- Custom metrics: `ongoingai.trace.queue_dropped_total` and
-  `ongoingai.trace.write_failed_total`.
-- Standard `OTEL_*` environment variable support.
+- Go runtime metrics registered automatically (`go_memory_*`,
+  `go_goroutine_*`, `go_gc_*`).
+- Credential scrubbing on all span attributes before export with zero
+  allocation overhead for clean spans.
+- Standard `OTEL_*` environment variable support with auto-enable behavior.
 - Graceful flush on shutdown for both trace and metric providers.
 
 ### Security and reliability
