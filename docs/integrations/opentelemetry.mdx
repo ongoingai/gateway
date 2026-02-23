@@ -1,6 +1,6 @@
 ---
 title: OpenTelemetry
-description: Export distributed traces and gateway metrics to any OTLP-compatible collector over HTTP, or scrape with Prometheus.
+description: Export distributed traces and gateway metrics to any OTLP-compatible backend. Logs, traces, and metrics are correlated end-to-end with trace context injection and histogram exemplars.
 related:
   title: Next steps
   description: Continue with trace model details, pull-based integrations, and config reference.
@@ -24,6 +24,9 @@ Prometheus scrape endpoint.
 - You want tenant-scoped span attributes for multi-tenant observability
   filtering.
 - You run Prometheus and want to scrape gateway metrics directly.
+- You want end-to-end correlation across all three observability pillars:
+  jump from a log line to its trace, or from a latency spike on a dashboard
+  to the exact request trace that caused it.
 
 ## How it works
 
@@ -37,12 +40,25 @@ When enabled, the gateway creates OTLP HTTP exporters at startup:
 4. A **credential scrubbing exporter** that wraps the trace exporter and
    sanitizes all span attribute values before they leave the process, providing
    defense-in-depth against credential leaks in telemetry.
+5. **Go runtime metrics** (`go_memory_*`, `go_goroutine_*`, `go_gc_*`,
+   `go_sched_*`) are registered automatically for process-level health
+   monitoring.
 
 The gateway wraps its HTTP server and upstream transport with OpenTelemetry
 instrumentation. Each inbound request produces a server span, and each upstream
 proxy call produces a client span as a child of the server span. Dedicated
 child spans cover auth evaluation, provider routing, trace enqueue, and
 storage writes.
+
+All three observability pillars are correlated end-to-end:
+
+- **Logs → Traces:** Structured JSON logs automatically include `trace_id`
+  and `span_id` from the active request span, so any log line can be joined
+  to its distributed trace.
+- **Metrics → Traces:** Histogram exemplars on proxy and provider latency
+  metrics carry the `trace_id` of the recorded request. In Grafana or any
+  exemplar-aware dashboard, clicking a latency spike jumps directly to the
+  trace that caused it.
 
 Trace context propagates using the
 [W3C Trace Context](https://www.w3.org/TR/trace-context/) standard.
@@ -233,6 +249,63 @@ All spans and metrics include the following resource attributes:
 | `service.name` | Value of `observability.otel.service_name`. |
 | `service.version` | Gateway binary version. |
 
+## Observability correlation
+
+The gateway connects all three observability pillars so you can move between
+logs, traces, and metrics without manual ID lookups.
+
+### Logs to traces
+
+Every structured JSON log line emitted during an active request span includes
+`trace_id` and `span_id` fields:
+
+```json
+{
+  "time": "2025-01-15T10:30:00Z",
+  "level": "INFO",
+  "msg": "captured exchange",
+  "trace_id": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4",
+  "span_id": "1a2b3c4d5e6f7a8b",
+  "correlation_id": "corr-abc-123",
+  "path": "/openai/v1/chat/completions",
+  "status": 200
+}
+```
+
+This is implemented via the `TraceLogHandler` slog wrapper, which injects
+trace context from the active span into every log record. Use these fields
+to join log lines to their distributed trace in Grafana Loki, Elasticsearch,
+Datadog, or any log backend that supports trace correlation.
+
+### Metrics to traces (exemplars)
+
+The proxy and provider latency histograms
+(`ongoingai.proxy.request_duration_seconds` and
+`ongoingai.provider.request_duration_seconds`) attach **exemplars** with the
+`trace_id` and `span_id` of the request that produced each measurement.
+
+In practice, this means:
+
+- A p99 latency spike on a Grafana dashboard has a clickable exemplar dot
+  that opens the exact trace responsible.
+- Prometheus stores exemplars alongside histogram buckets when
+  `--enable-feature=exemplar-storage` is active.
+- Grafana Tempo, Jaeger, and other trace backends can receive the jump from
+  the exemplar link.
+
+Exemplars are enabled automatically. They fire whenever the request context
+carries a sampled span, so sampling controls exemplar volume with no
+additional configuration.
+
+### Correlation summary
+
+| From | To | Mechanism |
+| --- | --- | --- |
+| Log line | Trace | `trace_id` and `span_id` in structured JSON logs |
+| Metric data point | Trace | Histogram exemplar with `trace_id` and `span_id` |
+| Trace span | Logs | Filter logs by `trace_id` in your log backend |
+| Trace span | Metrics | Span attributes match metric label dimensions |
+
 ## Metrics
 
 The gateway exports 12 metric instruments organized in three groups.
@@ -283,7 +356,9 @@ Counts traces successfully persisted to storage. No attributes.
 **Type:** Float64Histogram
 **Unit:** seconds
 
-Time to flush a batch of traces to storage. No attributes.
+Time to flush a batch of traces to storage. Uses custom bucket boundaries
+optimized for fast database writes: 1ms, 2.5ms, 5ms, 10ms, 25ms, 50ms,
+100ms, 250ms, 500ms, 1s. No attributes.
 
 #### `ongoingai.trace.flush_batch_size`
 
@@ -327,7 +402,10 @@ Counts upstream provider requests.
 **Type:** Float64Histogram
 **Unit:** seconds
 
-Upstream provider request duration.
+Upstream provider request duration. Uses custom bucket boundaries optimized
+for AI API response times: 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms,
+1s, 2.5s, 5s, 10s. Exemplars are attached with the `trace_id` and `span_id`
+of the recorded request.
 
 | Attribute | Description |
 | --- | --- |
@@ -359,7 +437,9 @@ Counts proxy requests with tenant scoping.
 **Type:** Float64Histogram
 **Unit:** seconds
 
-Proxy request duration with tenant scoping.
+Proxy request duration with tenant scoping. Uses the same custom bucket
+boundaries as the provider histogram (5ms to 10s). Exemplars are attached
+with the `trace_id` and `span_id` of the recorded request.
 
 | Attribute | Description |
 | --- | --- |
@@ -443,6 +523,42 @@ observability:
 
 Both exporters read from the same meter provider, so metric values are
 consistent across both surfaces.
+
+### Go runtime metrics
+
+The gateway automatically registers Go runtime metrics when metrics export is
+enabled (OTLP push or Prometheus). These appear alongside gateway metrics and
+include:
+
+- `go_memory_classes_heap_objects_bytes` — heap memory in use
+- `go_goroutine_count` — active goroutine count
+- `go_gc_duration_seconds` — GC pause durations
+- `go_sched_goroutines_goroutines` — scheduler goroutine count
+
+These are useful for monitoring gateway process health and capacity planning.
+
+### Enabling exemplar storage in Prometheus
+
+To use histogram exemplars for metrics-to-traces correlation, enable exemplar
+storage in Prometheus:
+
+```yaml filename="prometheus.yml"
+# Start Prometheus with --enable-feature=exemplar-storage
+# or add to your Prometheus config:
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: ongoingai-gateway
+    scrape_interval: 15s
+    static_configs:
+      - targets: ["localhost:8080"]
+    metrics_path: /metrics
+```
+
+In Grafana, exemplars appear as dots on histogram panels. Clicking an exemplar
+dot opens the linked trace in your configured trace data source (Tempo, Jaeger,
+etc.).
 
 ## Credential scrubbing
 
