@@ -20,6 +20,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -29,6 +30,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/exemplar"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -37,6 +39,13 @@ import (
 const (
 	instrumentationName = "ongoingai.gateway"
 	telemetryUnknown    = "unknown"
+)
+
+var (
+	// proxyLatencyBuckets covers typical AI API response times (5ms–10s).
+	proxyLatencyBuckets = []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0}
+	// traceFlushLatencyBuckets covers fast database writes (1ms–1s).
+	traceFlushLatencyBuckets = []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0}
 )
 
 // telemetryScope is the normalized request-scope dimension set used across
@@ -195,6 +204,22 @@ func Setup(ctx context.Context, cfg config.OTelConfig, serviceVersion string, lo
 	var meterOpts []sdkmetric.Option
 	meterOpts = append(meterOpts, sdkmetric.WithResource(res))
 
+	// Custom histogram bucket boundaries for proxy and trace-flush latencies.
+	meterOpts = append(meterOpts,
+		sdkmetric.WithView(sdkmetric.NewView(
+			sdkmetric.Instrument{Name: "ongoingai.proxy.request_duration_seconds"},
+			sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: proxyLatencyBuckets}},
+		)),
+		sdkmetric.WithView(sdkmetric.NewView(
+			sdkmetric.Instrument{Name: "ongoingai.provider.request_duration_seconds"},
+			sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: proxyLatencyBuckets}},
+		)),
+		sdkmetric.WithView(sdkmetric.NewView(
+			sdkmetric.Instrument{Name: "ongoingai.trace.flush_duration_seconds"},
+			sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: traceFlushLatencyBuckets}},
+		)),
+	)
+
 	if cfg.MetricsEnabled {
 		metricExporterOptions := []otlpmetrichttp.Option{
 			otlpmetrichttp.WithEndpoint(otlpEndpoint),
@@ -229,9 +254,17 @@ func Setup(ctx context.Context, cfg config.OTelConfig, serviceVersion string, lo
 	}
 
 	if cfg.MetricsEnabled || cfg.PrometheusEnabled {
-		meterProvider := sdkmetric.NewMeterProvider(meterOpts...)
+		meterProvider := sdkmetric.NewMeterProvider(
+			append(meterOpts, sdkmetric.WithExemplarFilter(exemplar.AlwaysOnFilter))...,
+		)
 		otel.SetMeterProvider(meterProvider)
 		runtime.shutdownFns = append(runtime.shutdownFns, meterProvider.Shutdown)
+
+		if err := otelruntime.Start(otelruntime.WithMeterProvider(meterProvider)); err != nil {
+			if logger != nil {
+				logger.Warn("failed to start go runtime metrics", "error", err)
+			}
+		}
 	}
 
 	otel.SetTextMapPropagator(propagation.TraceContext{})
@@ -636,8 +669,10 @@ func (r *Runtime) RecordTraceFlush(batchSize int, duration time.Duration) {
 }
 
 // RecordProviderRequest records a single upstream provider request with its
-// status code and latency.
+// status code and latency. The context carries the active span for exemplar
+// attachment on histogram data points (metrics→traces correlation).
 func (r *Runtime) RecordProviderRequest(
+	ctx context.Context,
 	provider string,
 	model string,
 	orgID string,
@@ -649,7 +684,9 @@ func (r *Runtime) RecordProviderRequest(
 	if !r.Enabled() {
 		return
 	}
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	scope := newTelemetryScope(provider, model, orgID, workspaceID, path)
 	if r.providerRequestCounter != nil {
 		attrs := append(scope.metricAttributes(), attribute.Int("status_code", statusCode))
@@ -715,11 +752,15 @@ func (r *Runtime) RegisterTraceQueueCapacityGauge(capacityFn func() int) {
 }
 
 // RecordProxyRequest records a proxy request with tenant-scoped attributes.
-func (r *Runtime) RecordProxyRequest(provider, model, orgID, workspaceID, path string, statusCode int, durationMS int64) {
+// The context carries the active span for exemplar attachment on histogram
+// data points (metrics→traces correlation).
+func (r *Runtime) RecordProxyRequest(ctx context.Context, provider, model, orgID, workspaceID, path string, statusCode int, durationMS int64) {
 	if !r.Enabled() {
 		return
 	}
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	scope := newTelemetryScope(provider, model, orgID, workspaceID, path)
 	if r.proxyRequestCounter != nil {
 		attrs := append(scope.metricAttributes(), attribute.Int("status_code", statusCode))

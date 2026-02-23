@@ -334,7 +334,9 @@ func runServe(args []string) int {
 		return 1
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(observability.NewTraceLogHandler(
+		slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}),
+	))
 	otelRuntime, otelErr := observability.Setup(context.Background(), cfg.Observability.OTel, version.String(), logger)
 	if otelErr != nil {
 		logger.Error("failed to initialize opentelemetry; continuing with instrumentation disabled", "error", otelErr)
@@ -458,8 +460,13 @@ func runServe(args []string) int {
 		}
 
 		traceRecord := buildTraceRecord(cfg, providerRegistry, exchange)
+		enqueueCtx := exchange.Context
+		if enqueueCtx == nil {
+			enqueueCtx = context.Background()
+		}
 		if otelRuntime != nil {
 			otelRuntime.RecordProviderRequest(
+				enqueueCtx,
 				traceRecord.Provider,
 				traceRecord.Model,
 				exchange.GatewayOrgID,
@@ -469,6 +476,7 @@ func runServe(args []string) int {
 				exchange.DurationMS,
 			)
 			otelRuntime.RecordProxyRequest(
+				enqueueCtx,
 				traceRecord.Provider,
 				traceRecord.Model,
 				exchange.GatewayOrgID,
@@ -477,11 +485,6 @@ func runServe(args []string) int {
 				exchange.StatusCode,
 				exchange.DurationMS,
 			)
-		}
-
-		enqueueCtx := exchange.Context
-		if enqueueCtx == nil {
-			enqueueCtx = context.Background()
 		}
 		_, endEnqueueSpan := otelRuntime.StartTraceEnqueueSpan(
 			enqueueCtx,
@@ -495,7 +498,7 @@ func runServe(args []string) int {
 		endEnqueueSpan(queued)
 
 		if !queued {
-			logger.Warn(
+			logger.WarnContext(enqueueCtx,
 				"trace queue is full; dropping trace",
 				"correlation_id", strings.TrimSpace(exchange.CorrelationID),
 				"path", exchange.Path,
@@ -513,7 +516,7 @@ func runServe(args []string) int {
 			}
 		}
 
-		logger.Debug(
+		logger.DebugContext(enqueueCtx,
 			"captured exchange",
 			"correlation_id", strings.TrimSpace(exchange.CorrelationID),
 			"method", exchange.Method,
@@ -807,7 +810,7 @@ func newProxyAuthAuditRecorder(logger *slog.Logger) auth.AuditRecorder {
 		return nil
 	}
 	return func(req *http.Request, event auth.AuditEvent) {
-		logger.Warn(
+		logger.WarnContext(req.Context(),
 			"audit gateway auth deny",
 			"correlation_id", requestCorrelationID(req),
 			"audit_action", strings.TrimSpace(event.Action),

@@ -104,7 +104,7 @@ func buildProxyHandler(route Route, logger *slog.Logger, transport http.RoundTri
 		req.Host = target.Host
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, req *http.Request, proxyErr error) {
-		logger.Error("proxy request failed", "provider_prefix", prefix, "path", req.URL.Path, "error", proxyErr)
+		logger.ErrorContext(req.Context(), "proxy request failed", "provider_prefix", prefix, "path", req.URL.Path, "error", proxyErr)
 		http.Error(w, "upstream request failed", http.StatusBadGateway)
 	}
 

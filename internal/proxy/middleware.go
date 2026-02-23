@@ -32,7 +32,7 @@ func LoggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 		start := time.Now()
 		recorder := newStatusResponseWriter(w)
 		next.ServeHTTP(recorder, r)
-		logger.Info(
+		logger.InfoContext(r.Context(),
 			"request complete",
 			"correlation_id", correlationID,
 			"method", r.Method,
