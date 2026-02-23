@@ -18,6 +18,9 @@ It covers current export surfaces and practical pull-based integration patterns.
 
 - Exposes JSON API endpoints for health, traces, and analytics data.
 - Emits structured JSON logs to stdout for request lifecycle and audit events.
+  Logs include `trace_id` and `span_id` when an active span is in context,
+  enabling direct log-to-trace correlation in Grafana Loki, Elasticsearch, or
+  any log backend.
 - Persists trace records to SQLite or Postgres for downstream reporting jobs.
 - Optionally exports gateway spans and metrics with native OpenTelemetry OTLP HTTP.
 - Exposes a native Prometheus `/metrics` scrape endpoint when
@@ -26,6 +29,10 @@ It covers current export surfaces and practical pull-based integration patterns.
   `provider`, `model`, `org_id`, `workspace_id`, and `route`.
 - When auth is enabled and identity is present, spans also include `key_id`
   and `role`.
+- Proxy and provider latency histograms attach exemplars with `trace_id`,
+  enabling click-through from dashboard latency spikes to the exact trace.
+- Go runtime metrics (`go_memory_*`, `go_goroutine_*`, `go_gc_*`) are
+  registered automatically for process health monitoring.
 - Supports browser-based integration clients with CORS headers on API routes.
 
 ## Operational fit

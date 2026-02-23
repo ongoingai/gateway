@@ -104,6 +104,8 @@ cd gateway && make build
 
 **PII Redaction** — Configurable redaction modes for storage and upstream traffic, with scoped policies per workspace or provider.
 
+**OpenTelemetry and Prometheus** — Native OTLP HTTP export for distributed traces and 12 operational metrics. Prometheus scrape endpoint for existing monitoring stacks. Logs, traces, and metrics are correlated end-to-end: structured logs carry `trace_id` and `span_id`, and histogram exemplars link latency spikes directly to the request trace that caused them.
+
 **Broad Compatibility** — Most tools that support OpenAI/Anthropic base URL configuration work via environment variables, with no plugins required.
 
 ---
@@ -239,6 +241,16 @@ tracing:
 auth:
   enabled: false
   header: X-OngoingAI-Gateway-Key
+
+# observability:                  # Optional: OpenTelemetry + Prometheus
+#   otel:
+#     enabled: true
+#     endpoint: localhost:4318
+#     service_name: ongoingai-gateway
+#     traces_enabled: true
+#     metrics_enabled: true
+#     prometheus_enabled: true
+#     prometheus_path: /metrics
 ```
 
 Schema migrations for SQLite and Postgres are embedded in the binary and applied automatically at startup.
