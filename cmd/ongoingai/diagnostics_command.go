@@ -16,11 +16,11 @@ import (
 )
 
 const (
-	defaultDiagnosticsFormat       = "text"
-	defaultDiagnosticsTarget       = "trace-pipeline"
-	defaultDiagnosticsTimeout      = 5 * time.Second
-	defaultGatewayAuthHeaderName   = "X-OngoingAI-Gateway-Key"
-	maxDiagnosticsResponseSize     = 1 << 20 // 1 MB
+	defaultDiagnosticsFormat     = "text"
+	defaultDiagnosticsTarget     = "trace-pipeline"
+	defaultDiagnosticsTimeout    = 5 * time.Second
+	defaultGatewayAuthHeaderName = "X-OngoingAI-Gateway-Key"
+	maxDiagnosticsResponseSize   = 1 << 20 // 1 MB
 )
 
 type tracePipelineDiagnosticsDocument struct {

@@ -19,32 +19,32 @@ import (
 )
 
 type stubStore struct {
-	mu                    sync.Mutex
-	getByID               map[string]*trace.Trace
-	getTraceErr           error
-	queryResult           *trace.TraceResult
-	queryErr              error
-	usageSummary          *trace.UsageSummary
-	usageSummaryErr       error
-	usageSeries           []trace.UsagePoint
-	usageSeriesErr        error
-	costSummary           *trace.CostSummary
-	costSummaryErr        error
-	costSeries            []trace.CostPoint
-	costSeriesErr         error
-	modelStats            []trace.ModelStats
-	modelStatsErr         error
-	keyStats              []trace.KeyStats
-	keyStatsErr           error
-	latencyStats          []trace.LatencyStats
-	latencyStatsErr       error
-	errorRateStats        []trace.ErrorRateStats
-	errorRateStatsErr     error
-	lastTraceFilter       trace.TraceFilter
-	lastAnalyticsFilter   trace.AnalyticsFilter
-	lastGroupBy           string
-	lastBucket            string
-	lastAnalyticsGroupBy  string
+	mu                   sync.Mutex
+	getByID              map[string]*trace.Trace
+	getTraceErr          error
+	queryResult          *trace.TraceResult
+	queryErr             error
+	usageSummary         *trace.UsageSummary
+	usageSummaryErr      error
+	usageSeries          []trace.UsagePoint
+	usageSeriesErr       error
+	costSummary          *trace.CostSummary
+	costSummaryErr       error
+	costSeries           []trace.CostPoint
+	costSeriesErr        error
+	modelStats           []trace.ModelStats
+	modelStatsErr        error
+	keyStats             []trace.KeyStats
+	keyStatsErr          error
+	latencyStats         []trace.LatencyStats
+	latencyStatsErr      error
+	errorRateStats       []trace.ErrorRateStats
+	errorRateStatsErr    error
+	lastTraceFilter      trace.TraceFilter
+	lastAnalyticsFilter  trace.AnalyticsFilter
+	lastGroupBy          string
+	lastBucket           string
+	lastAnalyticsGroupBy string
 }
 
 type stubGatewayKeyStore struct {

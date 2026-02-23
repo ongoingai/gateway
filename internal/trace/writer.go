@@ -24,22 +24,22 @@ type TracePipelineDiagnosticsReader interface {
 
 // TracePipelineDiagnostics captures trace pipeline queue pressure and drop signals.
 type TracePipelineDiagnostics struct {
-	QueueCapacity                    int        `json:"queue_capacity"`
-	QueueDepth                       int        `json:"queue_depth"`
-	QueueDepthHighWatermark          int        `json:"queue_depth_high_watermark"`
-	QueueUtilizationPct              int        `json:"queue_utilization_pct"`
-	QueueHighWatermarkUtilizationPct int        `json:"queue_high_watermark_utilization_pct"`
-	QueuePressureState               string     `json:"queue_pressure_state"`
-	QueueHighWatermarkPressureState  string     `json:"queue_high_watermark_pressure_state"`
-	EnqueueAcceptedTotal             int64      `json:"enqueue_accepted_total"`
-	EnqueueDroppedTotal              int64      `json:"enqueue_dropped_total"`
-	WriteDroppedTotal                int64      `json:"write_dropped_total"`
-	TotalDroppedTotal                int64      `json:"total_dropped_total"`
-	LastEnqueueDropAt                *time.Time        `json:"last_enqueue_drop_at,omitempty"`
-	LastWriteDropAt                  *time.Time        `json:"last_write_drop_at,omitempty"`
-	LastWriteDropOperation           string            `json:"last_write_drop_operation,omitempty"`
-	WriteFailuresByClass             map[string]int64  `json:"write_failures_by_class,omitempty"`
-	StoreDriver                      string            `json:"store_driver,omitempty"`
+	QueueCapacity                    int              `json:"queue_capacity"`
+	QueueDepth                       int              `json:"queue_depth"`
+	QueueDepthHighWatermark          int              `json:"queue_depth_high_watermark"`
+	QueueUtilizationPct              int              `json:"queue_utilization_pct"`
+	QueueHighWatermarkUtilizationPct int              `json:"queue_high_watermark_utilization_pct"`
+	QueuePressureState               string           `json:"queue_pressure_state"`
+	QueueHighWatermarkPressureState  string           `json:"queue_high_watermark_pressure_state"`
+	EnqueueAcceptedTotal             int64            `json:"enqueue_accepted_total"`
+	EnqueueDroppedTotal              int64            `json:"enqueue_dropped_total"`
+	WriteDroppedTotal                int64            `json:"write_dropped_total"`
+	TotalDroppedTotal                int64            `json:"total_dropped_total"`
+	LastEnqueueDropAt                *time.Time       `json:"last_enqueue_drop_at,omitempty"`
+	LastWriteDropAt                  *time.Time       `json:"last_write_drop_at,omitempty"`
+	LastWriteDropOperation           string           `json:"last_write_drop_operation,omitempty"`
+	WriteFailuresByClass             map[string]int64 `json:"write_failures_by_class,omitempty"`
+	StoreDriver                      string           `json:"store_driver,omitempty"`
 }
 
 // WriteFailure describes trace records that could not be persisted.
