@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	defaultDiagnosticsFormat     = "text"
-	defaultDiagnosticsTarget     = "trace-pipeline"
-	defaultDiagnosticsTimeout    = 5 * time.Second
-	defaultGatewayAuthHeaderName = "X-OngoingAI-Gateway-Key"
+	defaultDiagnosticsFormat       = "text"
+	defaultDiagnosticsTarget       = "trace-pipeline"
+	defaultDiagnosticsTimeout      = 5 * time.Second
+	defaultGatewayAuthHeaderName   = "X-OngoingAI-Gateway-Key"
+	maxDiagnosticsResponseSize     = 1 << 20 // 1 MB
 )
 
 type tracePipelineDiagnosticsDocument struct {
@@ -158,15 +159,19 @@ func fetchTracePipelineDiagnostics(baseURL, authHeader, gatewayKey string, timeo
 		req.Header.Set(authHeader, gatewayKey)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
 	if err != nil {
 		return tracePipelineDiagnosticsDocument{}, fmt.Errorf("send request: %w", err)
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDiagnosticsResponseSize+1))
 	if err != nil {
 		return tracePipelineDiagnosticsDocument{}, fmt.Errorf("read response: %w", err)
+	}
+	if int64(len(body)) > maxDiagnosticsResponseSize {
+		return tracePipelineDiagnosticsDocument{}, fmt.Errorf("response too large: %d bytes exceeds %d byte limit", len(body), maxDiagnosticsResponseSize)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -241,5 +246,31 @@ func writeTracePipelineDiagnosticsText(out io.Writer, document tracePipelineDiag
 	fmt.Fprintf(drops, "Last enqueue drop at\t%s\n", timePtrOr(document.Diagnostics.LastEnqueueDropAt, "(none)"))
 	fmt.Fprintf(drops, "Last write drop at\t%s\n", timePtrOr(document.Diagnostics.LastWriteDropAt, "(none)"))
 	fmt.Fprintf(drops, "Last write drop operation\t%s\n", valueOr(document.Diagnostics.LastWriteDropOperation, "(none)"))
-	return drops.Flush()
+	if err := drops.Flush(); err != nil {
+		return err
+	}
+
+	if len(document.Diagnostics.WriteFailuresByClass) > 0 {
+		fmt.Fprintln(out, "\nWrite Failures by Class")
+		failures := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		for _, class := range []string{"connection", "timeout", "contention", "constraint", "unknown"} {
+			if count, ok := document.Diagnostics.WriteFailuresByClass[class]; ok {
+				fmt.Fprintf(failures, "%s\t%d\n", class, count)
+			}
+		}
+		if err := failures.Flush(); err != nil {
+			return err
+		}
+	}
+
+	if document.Diagnostics.StoreDriver != "" {
+		fmt.Fprintln(out, "\nStore")
+		store := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+		fmt.Fprintf(store, "Driver\t%s\n", document.Diagnostics.StoreDriver)
+		if err := store.Flush(); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }

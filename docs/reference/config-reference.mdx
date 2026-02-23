@@ -54,6 +54,8 @@ observability:
     service_name: ongoingai-gateway
     traces_enabled: true
     metrics_enabled: true
+    prometheus_enabled: false
+    prometheus_path: /metrics
     sampling_ratio: 1.0
     export_timeout_ms: 3000
     metric_export_interval_ms: 10000
@@ -164,7 +166,9 @@ Treat this baseline as a starting point. Most production deployments adjust
 | `observability.otel.insecure` | bool | `true` | No | Enables plaintext OTLP HTTP export (recommended for local collectors). |
 | `observability.otel.service_name` | string | `ongoingai-gateway` | Conditional | Required when `enabled=true`. Sent as `service.name`. |
 | `observability.otel.traces_enabled` | bool | `true` | Conditional | At least one of `traces_enabled` or `metrics_enabled` must be `true` when enabled. |
-| `observability.otel.metrics_enabled` | bool | `true` | Conditional | At least one of `traces_enabled` or `metrics_enabled` must be `true` when enabled. |
+| `observability.otel.metrics_enabled` | bool | `true` | Conditional | At least one of `traces_enabled`, `metrics_enabled`, or `prometheus_enabled` must be `true` when enabled. |
+| `observability.otel.prometheus_enabled` | bool | `false` | No | Enables native Prometheus scrape endpoint. Can be combined with OTLP push metrics. |
+| `observability.otel.prometheus_path` | string | `/metrics` | No | Path for the Prometheus scrape endpoint. Must start with `/` and must not overlap with `/api`, `/openai`, or `/anthropic`. |
 | `observability.otel.sampling_ratio` | float64 | `1.0` | No | Trace sampling ratio in range `0.0` to `1.0` (parent-based). |
 | `observability.otel.export_timeout_ms` | int | `3000` | No | OTLP export timeout in milliseconds; must be `> 0`. |
 | `observability.otel.metric_export_interval_ms` | int | `10000` | No | Periodic metric export interval in milliseconds; must be `> 0`. |
@@ -271,6 +275,8 @@ The following fields support env var overrides:
 | `observability.otel.sampling_ratio` | `OTEL_TRACES_SAMPLER_ARG` |
 | `observability.otel.export_timeout_ms` | `OTEL_EXPORTER_OTLP_TIMEOUT` |
 | `observability.otel.metric_export_interval_ms` | `OTEL_METRIC_EXPORT_INTERVAL` |
+| `observability.otel.prometheus_enabled` | `ONGOINGAI_PROMETHEUS_ENABLED` |
+| `observability.otel.prometheus_path` | `ONGOINGAI_PROMETHEUS_PATH` |
 | `pii.mode` | `ONGOINGAI_PII_MODE` |
 | `pii.policy_id` | `ONGOINGAI_PII_POLICY_ID` |
 | `pii.replacement.hash_salt` | `ONGOINGAI_PII_HASH_SALT` |

@@ -30,3 +30,16 @@ dist/
 data/
 build/
 /ongoingai
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+Desktop.ini
+._*
+
+# IDE / editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

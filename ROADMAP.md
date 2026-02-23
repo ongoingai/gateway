@@ -21,6 +21,7 @@ This roadmap is organized as priority-ordered phases.
 - Phase 0: Completed (15/15)
 - Phase 1: Completed (20/20)
 - Phase 2: Completed (11/11)
+- Phase 3: Completed (11/11)
 
 ## Phase 0: Foundation And Initial Setup (Completed)
 
@@ -118,6 +119,36 @@ Exit criteria:
 4. Regression tests cover report/debug workflows, lineage reconstruction, and streaming edge cases.
 5. Correlation identifiers reliably connect logs, spans, and persisted traces for the same request lifecycle.
 6. Queue-pressure and dropped-trace diagnostics are observable without inspecting raw database tables.
+
+## Phase 3: Observability And OpenTelemetry Expansion (Completed)
+
+Focus: deepen operational visibility across the gateway with richer metrics, broader OpenTelemetry coverage, and actionable analytics for latency, errors, and cost.
+
+Planned work:
+
+- [x] Add internal metrics for trace write pipeline health: queue depth, enqueue/drop rates, flush latency, and batch sizes.
+- [x] Add write failure diagnostics with structured error classification and per-store failure counters.
+- [x] Add provider health metrics: upstream request counts, error rates, and response latency histograms per provider and model.
+- [x] Expand analytics depth for request latency distributions, error rate breakdowns by provider/route/key, and cost trend aggregations over configurable windows.
+- [x] Add OpenTelemetry spans for key gateway operations: auth evaluation, provider routing, trace enqueue, and storage writes.
+- [x] Add OpenTelemetry metric instruments (counters, histograms, gauges) for queue pressure, write throughput, provider health, and proxy latency.
+- [x] Ensure all new spans and metrics carry consistent tenant-scoped attributes (org, workspace, provider, model).
+- [x] Add Prometheus-compatible metric export support.
+- [x] Enforce credential scrubbing on all span attributes and metric labels so API keys, tokens, and provider credentials never leak into telemetry data.
+- [x] Add tests for all new metrics, spans, and analytics paths, including regression tests for credential scrubbing in telemetry exports.
+- [x] Update configuration reference, self-hosting guide, and troubleshooting docs to cover new observability features, Prometheus setup, and alerting recommendations.
+
+Exit criteria:
+
+1. Queue depth, drop rates, and flush behavior are observable via metrics and spans.
+2. Write failures are classified and counted with enough detail to diagnose storage issues without log tailing.
+3. Provider health (latency, errors, availability) is queryable per provider and model.
+4. Latency, error rate, and cost analytics are available through the analytics API with configurable time windows.
+5. All new OpenTelemetry spans and metrics follow consistent naming and carry tenant-scoped attributes.
+6. No API keys, tokens, or provider credentials appear in any span attribute, metric label, or exported telemetry payload. Regression tests verify this.
+7. Prometheus export is functional and documented.
+8. All new observability code paths have corresponding test coverage.
+9. Configuration reference, self-hosting guide, and troubleshooting docs are updated to reflect the new observability surface.
 
 ## What's Next
 

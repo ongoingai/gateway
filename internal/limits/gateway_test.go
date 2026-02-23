@@ -62,6 +62,12 @@ func (s *stubTraceStore) GetModelStats(context.Context, trace.AnalyticsFilter) (
 func (s *stubTraceStore) GetKeyStats(context.Context, trace.AnalyticsFilter) ([]trace.KeyStats, error) {
 	return nil, trace.ErrNotImplemented
 }
+func (s *stubTraceStore) GetLatencyPercentiles(context.Context, trace.AnalyticsFilter, string) ([]trace.LatencyStats, error) {
+	return nil, trace.ErrNotImplemented
+}
+func (s *stubTraceStore) GetErrorRateBreakdown(context.Context, trace.AnalyticsFilter, string) ([]trace.ErrorRateStats, error) {
+	return nil, trace.ErrNotImplemented
+}
 
 func TestGatewayLimiterPerKeyRateLimit(t *testing.T) {
 	t.Parallel()

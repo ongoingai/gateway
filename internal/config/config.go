@@ -66,6 +66,8 @@ type OTelConfig struct {
 	ServiceName            string  `yaml:"service_name"`
 	TracesEnabled          bool    `yaml:"traces_enabled"`
 	MetricsEnabled         bool    `yaml:"metrics_enabled"`
+	PrometheusEnabled      bool    `yaml:"prometheus_enabled"`
+	PrometheusPath         string  `yaml:"prometheus_path"`
 	SamplingRatio          float64 `yaml:"sampling_ratio"`
 	ExportTimeoutMS        int     `yaml:"export_timeout_ms"`
 	MetricExportIntervalMS int     `yaml:"metric_export_interval_ms"`
@@ -84,6 +86,7 @@ const (
 	defaultOTELSamplingRatio          = 1.0
 	defaultOTELExportTimeoutMS        = 3000
 	defaultOTELMetricExportIntervalMS = 10000
+	defaultPrometheusPath             = "/metrics"
 )
 
 type PIIConfig struct {
@@ -299,6 +302,8 @@ func Default() Config {
 				ServiceName:            defaultOTELServiceName,
 				TracesEnabled:          true,
 				MetricsEnabled:         true,
+				PrometheusEnabled:      false,
+				PrometheusPath:         defaultPrometheusPath,
 				SamplingRatio:          defaultOTELSamplingRatio,
 				ExportTimeoutMS:        defaultOTELExportTimeoutMS,
 				MetricExportIntervalMS: defaultOTELMetricExportIntervalMS,
@@ -463,14 +468,14 @@ func validateOTelConfig(cfg OTelConfig) error {
 	if !cfg.Enabled {
 		return nil
 	}
-	if strings.TrimSpace(cfg.Endpoint) == "" {
+	if strings.TrimSpace(cfg.Endpoint) == "" && !cfg.PrometheusEnabled {
 		return errors.New("observability.otel.endpoint is required when observability.otel.enabled=true")
 	}
 	if strings.TrimSpace(cfg.ServiceName) == "" {
 		return errors.New("observability.otel.service_name is required when observability.otel.enabled=true")
 	}
-	if !cfg.TracesEnabled && !cfg.MetricsEnabled {
-		return errors.New("observability.otel requires traces_enabled and/or metrics_enabled when enabled")
+	if !cfg.TracesEnabled && !cfg.MetricsEnabled && !cfg.PrometheusEnabled {
+		return errors.New("observability.otel requires traces_enabled, metrics_enabled, and/or prometheus_enabled when enabled")
 	}
 	if cfg.SamplingRatio < 0 || cfg.SamplingRatio > 1 {
 		return fmt.Errorf("observability.otel.sampling_ratio must be between 0 and 1 (got %f)", cfg.SamplingRatio)
@@ -480,6 +485,17 @@ func validateOTelConfig(cfg OTelConfig) error {
 	}
 	if cfg.MetricExportIntervalMS <= 0 {
 		return fmt.Errorf("observability.otel.metric_export_interval_ms must be > 0 (got %d)", cfg.MetricExportIntervalMS)
+	}
+	if cfg.PrometheusEnabled {
+		path := strings.TrimSpace(cfg.PrometheusPath)
+		if !strings.HasPrefix(path, "/") {
+			return fmt.Errorf("observability.otel.prometheus_path must start with '/' (got %q)", cfg.PrometheusPath)
+		}
+		for _, reserved := range []string{"/api", "/openai", "/anthropic"} {
+			if strings.HasPrefix(path, reserved) {
+				return fmt.Errorf("observability.otel.prometheus_path must not overlap with %s (got %q)", reserved, cfg.PrometheusPath)
+			}
+		}
 	}
 	return nil
 }
@@ -589,12 +605,18 @@ func applyEnv(cfg *Config) error {
 		otelConfigured = true
 	}
 	if metricsExporter := strings.TrimSpace(os.Getenv("OTEL_METRICS_EXPORTER")); metricsExporter != "" {
-		enabled, err := otelExporterEnabled(metricsExporter)
-		if err != nil {
-			return fmt.Errorf("invalid OTEL_METRICS_EXPORTER: %w", err)
+		if strings.ToLower(metricsExporter) == "prometheus" {
+			cfg.Observability.OTel.PrometheusEnabled = true
+			cfg.Observability.OTel.MetricsEnabled = false
+			otelConfigured = true
+		} else {
+			enabled, err := otelExporterEnabled(metricsExporter)
+			if err != nil {
+				return fmt.Errorf("invalid OTEL_METRICS_EXPORTER: %w", err)
+			}
+			cfg.Observability.OTel.MetricsEnabled = enabled
+			otelConfigured = true
 		}
-		cfg.Observability.OTel.MetricsEnabled = enabled
-		otelConfigured = true
 	}
 	if samplingRatio := strings.TrimSpace(os.Getenv("OTEL_TRACES_SAMPLER_ARG")); samplingRatio != "" {
 		v, err := strconv.ParseFloat(samplingRatio, 64)
@@ -620,6 +642,19 @@ func applyEnv(cfg *Config) error {
 		cfg.Observability.OTel.MetricExportIntervalMS = v
 		otelConfigured = true
 	}
+	if prometheusEnabled := strings.TrimSpace(os.Getenv("ONGOINGAI_PROMETHEUS_ENABLED")); prometheusEnabled != "" {
+		v, err := strconv.ParseBool(prometheusEnabled)
+		if err != nil {
+			return fmt.Errorf("invalid ONGOINGAI_PROMETHEUS_ENABLED: %w", err)
+		}
+		cfg.Observability.OTel.PrometheusEnabled = v
+		otelConfigured = true
+	}
+	if prometheusPath := strings.TrimSpace(os.Getenv("ONGOINGAI_PROMETHEUS_PATH")); prometheusPath != "" {
+		cfg.Observability.OTel.PrometheusPath = prometheusPath
+		otelConfigured = true
+	}
+
 	if otelConfigured && !otelSDKDisabledSet {
 		cfg.Observability.OTel.Enabled = true
 	}

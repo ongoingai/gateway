@@ -19,27 +19,32 @@ import (
 )
 
 type stubStore struct {
-	mu                  sync.Mutex
-	getByID             map[string]*trace.Trace
-	getTraceErr         error
-	queryResult         *trace.TraceResult
-	queryErr            error
-	usageSummary        *trace.UsageSummary
-	usageSummaryErr     error
-	usageSeries         []trace.UsagePoint
-	usageSeriesErr      error
-	costSummary         *trace.CostSummary
-	costSummaryErr      error
-	costSeries          []trace.CostPoint
-	costSeriesErr       error
-	modelStats          []trace.ModelStats
-	modelStatsErr       error
-	keyStats            []trace.KeyStats
-	keyStatsErr         error
-	lastTraceFilter     trace.TraceFilter
-	lastAnalyticsFilter trace.AnalyticsFilter
-	lastGroupBy         string
-	lastBucket          string
+	mu                    sync.Mutex
+	getByID               map[string]*trace.Trace
+	getTraceErr           error
+	queryResult           *trace.TraceResult
+	queryErr              error
+	usageSummary          *trace.UsageSummary
+	usageSummaryErr       error
+	usageSeries           []trace.UsagePoint
+	usageSeriesErr        error
+	costSummary           *trace.CostSummary
+	costSummaryErr        error
+	costSeries            []trace.CostPoint
+	costSeriesErr         error
+	modelStats            []trace.ModelStats
+	modelStatsErr         error
+	keyStats              []trace.KeyStats
+	keyStatsErr           error
+	latencyStats          []trace.LatencyStats
+	latencyStatsErr       error
+	errorRateStats        []trace.ErrorRateStats
+	errorRateStatsErr     error
+	lastTraceFilter       trace.TraceFilter
+	lastAnalyticsFilter   trace.AnalyticsFilter
+	lastGroupBy           string
+	lastBucket            string
+	lastAnalyticsGroupBy  string
 }
 
 type stubGatewayKeyStore struct {
@@ -239,6 +244,30 @@ func (s *stubStore) GetKeyStats(_ context.Context, filter trace.AnalyticsFilter)
 		return nil, s.keyStatsErr
 	}
 	return s.keyStats, nil
+}
+
+func (s *stubStore) GetLatencyPercentiles(_ context.Context, filter trace.AnalyticsFilter, groupBy string) ([]trace.LatencyStats, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.lastAnalyticsFilter = filter
+	s.lastAnalyticsGroupBy = groupBy
+	if s.latencyStatsErr != nil {
+		return nil, s.latencyStatsErr
+	}
+	return s.latencyStats, nil
+}
+
+func (s *stubStore) GetErrorRateBreakdown(_ context.Context, filter trace.AnalyticsFilter, groupBy string) ([]trace.ErrorRateStats, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.lastAnalyticsFilter = filter
+	s.lastAnalyticsGroupBy = groupBy
+	if s.errorRateStatsErr != nil {
+		return nil, s.errorRateStatsErr
+	}
+	return s.errorRateStats, nil
 }
 
 func TestRouterServesTracesListAndDetail(t *testing.T) {
@@ -967,6 +996,53 @@ func TestRouterTracePipelineDiagnostics(t *testing.T) {
 	}
 }
 
+func TestRouterTracePipelineDiagnosticsIncludesWriteFailuresAndStoreDriver(t *testing.T) {
+	t.Parallel()
+
+	handler := NewRouter(RouterOptions{
+		AppVersion:    "dev",
+		Store:         &stubStore{},
+		StorageDriver: "postgres",
+		TracePipelineReader: &stubTracePipelineDiagnosticsReader{
+			snapshot: trace.TracePipelineDiagnostics{
+				QueueCapacity:      1024,
+				QueueDepth:         0,
+				QueuePressureState: trace.TraceQueuePressureOK,
+				WriteDroppedTotal:  5,
+				TotalDroppedTotal:  5,
+				WriteFailuresByClass: map[string]int64{
+					"connection": 3,
+					"timeout":    2,
+				},
+			},
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/diagnostics/trace-pipeline", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", rec.Code)
+	}
+
+	var payload tracePipelineDiagnosticsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Diagnostics.StoreDriver != "postgres" {
+		t.Fatalf("store_driver=%q, want postgres", payload.Diagnostics.StoreDriver)
+	}
+	if payload.Diagnostics.WriteFailuresByClass == nil {
+		t.Fatal("write_failures_by_class should be populated")
+	}
+	if payload.Diagnostics.WriteFailuresByClass["connection"] != 3 {
+		t.Fatalf("connection=%d, want 3", payload.Diagnostics.WriteFailuresByClass["connection"])
+	}
+	if payload.Diagnostics.WriteFailuresByClass["timeout"] != 2 {
+		t.Fatalf("timeout=%d, want 2", payload.Diagnostics.WriteFailuresByClass["timeout"])
+	}
+}
+
 func TestRouterTracePipelineDiagnosticsUnavailable(t *testing.T) {
 	t.Parallel()
 
@@ -1244,6 +1320,207 @@ func TestRouterAnalyticsErrorAndValidationPaths(t *testing.T) {
 	handlerValidation.ServeHTTP(invalidRangeRec, invalidRangeReq)
 	if invalidRangeRec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid date range status=%d, want 400", invalidRangeRec.Code)
+	}
+}
+
+func TestRouterLatencyEndpoint(t *testing.T) {
+	t.Parallel()
+
+	store := &stubStore{
+		latencyStats: []trace.LatencyStats{
+			{
+				Group:        "openai",
+				RequestCount: 5,
+				AvgMS:        150.0,
+				MinMS:        50,
+				MaxMS:        300,
+				P50MS:        140.0,
+				P95MS:        280.0,
+				P99MS:        295.0,
+			},
+			{
+				Group:        "anthropic",
+				RequestCount: 3,
+				AvgMS:        200.0,
+				MinMS:        100,
+				MaxMS:        350,
+				P50MS:        180.0,
+				P95MS:        330.0,
+				P99MS:        345.0,
+			},
+		},
+	}
+
+	handler := NewRouter(RouterOptions{
+		AppVersion: "dev",
+		Store:      store,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/latency?group_by=provider", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("latency status=%d, want 200", rec.Code)
+	}
+	if store.lastAnalyticsGroupBy != "provider" {
+		t.Fatalf("latency group_by=%q, want provider", store.lastAnalyticsGroupBy)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode latency response: %v", err)
+	}
+	if body["group_by"] != "provider" {
+		t.Fatalf("latency group_by=%v, want provider", body["group_by"])
+	}
+	items, ok := body["items"].([]any)
+	if !ok || len(items) != 2 {
+		t.Fatalf("latency items=%v, want 2 items", body["items"])
+	}
+	first, ok := items[0].(map[string]any)
+	if !ok || first["group"] != "openai" {
+		t.Fatalf("latency first item=%v", items[0])
+	}
+	if first["p50_ms"] != float64(140) {
+		t.Fatalf("latency first p50_ms=%v, want 140", first["p50_ms"])
+	}
+}
+
+func TestRouterErrorsEndpoint(t *testing.T) {
+	t.Parallel()
+
+	store := &stubStore{
+		errorRateStats: []trace.ErrorRateStats{
+			{
+				Group:         "openai",
+				TotalRequests: 10,
+				ErrorCount4xx: 1,
+				ErrorCount5xx: 2,
+				ErrorRate:     0.3,
+			},
+		},
+	}
+
+	handler := NewRouter(RouterOptions{
+		AppVersion: "dev",
+		Store:      store,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/errors?group_by=provider", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("errors status=%d, want 200", rec.Code)
+	}
+	if store.lastAnalyticsGroupBy != "provider" {
+		t.Fatalf("errors group_by=%q, want provider", store.lastAnalyticsGroupBy)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode errors response: %v", err)
+	}
+	if body["group_by"] != "provider" {
+		t.Fatalf("errors group_by=%v, want provider", body["group_by"])
+	}
+	items, ok := body["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("errors items=%v, want 1 item", body["items"])
+	}
+	first, ok := items[0].(map[string]any)
+	if !ok || first["group"] != "openai" {
+		t.Fatalf("errors first item=%v", items[0])
+	}
+	if first["error_count_4xx"] != float64(1) || first["error_count_5xx"] != float64(2) {
+		t.Fatalf("errors first item counts=%v", first)
+	}
+}
+
+func TestRouterLatencyAndErrorsValidation(t *testing.T) {
+	t.Parallel()
+
+	handler := NewRouter(RouterOptions{
+		AppVersion: "dev",
+		Store:      &stubStore{},
+	})
+
+	invalidGroupReq := httptest.NewRequest(http.MethodGet, "/api/analytics/latency?group_by=invalid", nil)
+	invalidGroupRec := httptest.NewRecorder()
+	handler.ServeHTTP(invalidGroupRec, invalidGroupReq)
+	if invalidGroupRec.Code != http.StatusBadRequest {
+		t.Fatalf("latency invalid group_by status=%d, want 400", invalidGroupRec.Code)
+	}
+
+	invalidGroupReq2 := httptest.NewRequest(http.MethodGet, "/api/analytics/errors?group_by=invalid", nil)
+	invalidGroupRec2 := httptest.NewRecorder()
+	handler.ServeHTTP(invalidGroupRec2, invalidGroupReq2)
+	if invalidGroupRec2.Code != http.StatusBadRequest {
+		t.Fatalf("errors invalid group_by status=%d, want 400", invalidGroupRec2.Code)
+	}
+
+	routeGroupReq := httptest.NewRequest(http.MethodGet, "/api/analytics/latency?group_by=route", nil)
+	routeGroupRec := httptest.NewRecorder()
+	handler.ServeHTTP(routeGroupRec, routeGroupReq)
+	if routeGroupRec.Code != http.StatusOK {
+		t.Fatalf("latency route group_by status=%d, want 200", routeGroupRec.Code)
+	}
+
+	keyGroupReq := httptest.NewRequest(http.MethodGet, "/api/analytics/errors?group_by=key", nil)
+	keyGroupRec := httptest.NewRecorder()
+	handler.ServeHTTP(keyGroupRec, keyGroupReq)
+	if keyGroupRec.Code != http.StatusOK {
+		t.Fatalf("errors key group_by status=%d, want 200", keyGroupRec.Code)
+	}
+}
+
+func TestRouterCostSeriesIncludesRequestCountAndAvgCost(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 12, 0, 0, 0, 0, time.UTC)
+	store := &stubStore{
+		costSeries: []trace.CostPoint{
+			{
+				BucketStart:  now,
+				Group:        "openai",
+				TotalCostUSD: 0.006,
+				RequestCount: 3,
+				AvgCostUSD:   0.002,
+			},
+		},
+	}
+
+	handler := NewRouter(RouterOptions{
+		AppVersion: "dev",
+		Store:      store,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/analytics/cost?group_by=provider&bucket=day", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cost series status=%d, want 200", rec.Code)
+	}
+
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode cost series response: %v", err)
+	}
+	items, ok := body["items"].([]any)
+	if !ok || len(items) != 1 {
+		t.Fatalf("cost series items=%v, want 1 item", body["items"])
+	}
+	first, ok := items[0].(map[string]any)
+	if !ok {
+		t.Fatalf("cost series first item=%v", items[0])
+	}
+	if first["request_count"] != float64(3) {
+		t.Fatalf("cost series request_count=%v, want 3", first["request_count"])
+	}
+	if first["avg_cost_usd"] != float64(0.002) {
+		t.Fatalf("cost series avg_cost_usd=%v, want 0.002", first["avg_cost_usd"])
 	}
 }
 

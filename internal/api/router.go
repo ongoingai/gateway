@@ -34,7 +34,8 @@ func NewRouter(options RouterOptions) http.Handler {
 		Store:         options.Store,
 	}))
 	mux.Handle("/api/diagnostics/trace-pipeline", TracePipelineDiagnosticsHandler(TracePipelineDiagnosticsOptions{
-		Reader: options.TracePipelineReader,
+		Reader:      options.TracePipelineReader,
+		StoreDriver: options.StorageDriver,
 	}))
 	mux.Handle("/api/traces", TracesHandler(options.Store))
 	mux.Handle("/api/traces/", TraceDetailHandler(options.Store))
@@ -42,6 +43,8 @@ func NewRouter(options RouterOptions) http.Handler {
 	mux.Handle("/api/analytics/cost", CostHandler(options.Store))
 	mux.Handle("/api/analytics/models", ModelsHandler(options.Store))
 	mux.Handle("/api/analytics/keys", KeysHandler(options.Store))
+	mux.Handle("/api/analytics/latency", LatencyHandler(options.Store))
+	mux.Handle("/api/analytics/errors", ErrorsHandler(options.Store))
 	mux.Handle("/api/analytics/summary", SummaryHandler(options.Store))
 	mux.Handle("/api/gateway-keys", GatewayKeysHandler(options.GatewayKeyStore, options.GatewayKeyAuditRecorder))
 	mux.Handle("/api/gateway-keys/", GatewayKeyDetailHandler(options.GatewayKeyStore, options.GatewayKeyAuditRecorder))

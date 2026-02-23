@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -69,6 +70,14 @@ func (s *testStore) GetModelStats(_ context.Context, _ AnalyticsFilter) ([]Model
 }
 
 func (s *testStore) GetKeyStats(_ context.Context, _ AnalyticsFilter) ([]KeyStats, error) {
+	return nil, ErrNotImplemented
+}
+
+func (s *testStore) GetLatencyPercentiles(_ context.Context, _ AnalyticsFilter, _ string) ([]LatencyStats, error) {
+	return nil, ErrNotImplemented
+}
+
+func (s *testStore) GetErrorRateBreakdown(_ context.Context, _ AnalyticsFilter, _ string) ([]ErrorRateStats, error) {
 	return nil, ErrNotImplemented
 }
 
@@ -151,6 +160,18 @@ func (s *contextAwareBlockingStore) WriteBatch(ctx context.Context, traces []*Tr
 
 	<-ctx.Done()
 	return ctx.Err()
+}
+
+type alwaysFailStore struct {
+	testStore
+}
+
+func (s *alwaysFailStore) WriteTrace(_ context.Context, _ *Trace) error {
+	return errors.New("always fail")
+}
+
+func (s *alwaysFailStore) WriteBatch(_ context.Context, _ []*Trace) error {
+	return errors.New("always fail")
 }
 
 var errFlakyWrite = errors.New("flaky write")
@@ -469,6 +490,253 @@ func TestWriterShutdownCancelsInflightWriteOnTimeout(t *testing.T) {
 	}
 }
 
+func TestWriterMetricsOnEnqueueCalledOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	store := &testStore{}
+	writer := NewWriter(store, 8)
+	writer.Start(context.Background())
+
+	var enqueueCount int64
+	writer.SetMetrics(&WriterMetrics{
+		OnEnqueue: func() { atomic.AddInt64(&enqueueCount, 1) },
+	})
+
+	for i := 0; i < 5; i++ {
+		if !writer.Enqueue(&Trace{ID: "trace"}) {
+			t.Fatalf("enqueue failed at index %d", i)
+		}
+	}
+	writer.Stop()
+
+	if got := atomic.LoadInt64(&enqueueCount); got != 5 {
+		t.Fatalf("OnEnqueue count=%d, want 5", got)
+	}
+}
+
+func TestWriterMetricsOnDropCalledWhenQueueFull(t *testing.T) {
+	t.Parallel()
+
+	store := &blockingStore{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	writer := NewWriter(store, 1)
+	writer.Start(context.Background())
+
+	var dropCount int64
+	writer.SetMetrics(&WriterMetrics{
+		OnDrop: func() { atomic.AddInt64(&dropCount, 1) },
+	})
+
+	// First enqueue: consumed by the worker goroutine.
+	if !writer.Enqueue(&Trace{ID: "trace-1"}) {
+		t.Fatal("first enqueue unexpectedly failed")
+	}
+
+	select {
+	case <-store.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first write to block")
+	}
+
+	// Second enqueue: fills the buffer (size 1).
+	if !writer.Enqueue(&Trace{ID: "trace-2"}) {
+		t.Fatal("second enqueue unexpectedly failed")
+	}
+
+	// Third enqueue: should drop.
+	if writer.Enqueue(&Trace{ID: "trace-3"}) {
+		t.Fatal("third enqueue should fail when queue is full")
+	}
+
+	close(store.release)
+	writer.Stop()
+
+	if got := atomic.LoadInt64(&dropCount); got != 1 {
+		t.Fatalf("OnDrop count=%d, want 1", got)
+	}
+}
+
+func TestWriterMetricsOnFlushCalledWithBatchSizeAndDuration(t *testing.T) {
+	t.Parallel()
+
+	store := &testStore{}
+	writer := NewWriter(store, 8)
+
+	type flushRecord struct {
+		batchSize int
+		duration  time.Duration
+	}
+	var mu sync.Mutex
+	var flushes []flushRecord
+	writer.SetMetrics(&WriterMetrics{
+		OnFlush: func(batchSize int, duration time.Duration) {
+			mu.Lock()
+			flushes = append(flushes, flushRecord{batchSize: batchSize, duration: duration})
+			mu.Unlock()
+		},
+	})
+
+	writer.Start(context.Background())
+	for i := 0; i < 4; i++ {
+		if !writer.Enqueue(&Trace{ID: "trace"}) {
+			t.Fatalf("enqueue failed at index %d", i)
+		}
+	}
+	writer.Stop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(flushes) == 0 {
+		t.Fatal("expected at least one OnFlush call")
+	}
+	totalFlushed := 0
+	for _, f := range flushes {
+		if f.batchSize <= 0 {
+			t.Fatalf("flush batchSize=%d, want >0", f.batchSize)
+		}
+		if f.duration < 0 {
+			t.Fatalf("flush duration=%v, want >=0", f.duration)
+		}
+		totalFlushed += f.batchSize
+	}
+	if totalFlushed != 4 {
+		t.Fatalf("total flushed=%d, want 4", totalFlushed)
+	}
+}
+
+func TestWriterMetricsNilSafe(t *testing.T) {
+	t.Parallel()
+
+	store := &testStore{}
+	writer := NewWriter(store, 8)
+	// Do not call SetMetrics — ensure no panics with nil metrics.
+	writer.Start(context.Background())
+
+	for i := 0; i < 3; i++ {
+		writer.Enqueue(&Trace{ID: "trace"})
+	}
+	writer.Stop()
+
+	if got := store.Count(); got != 3 {
+		t.Fatalf("write count=%d, want 3", got)
+	}
+}
+
+func TestWriterQueueLen(t *testing.T) {
+	t.Parallel()
+
+	store := &blockingStore{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	writer := NewWriter(store, 4)
+	writer.Start(context.Background())
+
+	// Enqueue one to trigger the worker and block it.
+	if !writer.Enqueue(&Trace{ID: "trace-1"}) {
+		t.Fatal("first enqueue failed")
+	}
+
+	select {
+	case <-store.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first write to block")
+	}
+
+	// The worker consumed the first trace; these 2 remain in the channel buffer.
+	if !writer.Enqueue(&Trace{ID: "trace-2"}) {
+		t.Fatal("second enqueue failed")
+	}
+	if !writer.Enqueue(&Trace{ID: "trace-3"}) {
+		t.Fatal("third enqueue failed")
+	}
+
+	if got := writer.QueueLen(); got != 2 {
+		t.Fatalf("QueueLen()=%d, want 2", got)
+	}
+
+	close(store.release)
+	writer.Stop()
+}
+
+func TestWriterTracePipelineDiagnosticsTracksWriteFailuresByClass(t *testing.T) {
+	t.Parallel()
+
+	writer := NewWriter(&testStore{}, 8)
+
+	// Simulate classified failures directly to test per-class counter logic
+	// independent of batch grouping behavior.
+	writer.reportWriteFailure(WriteFailure{
+		Operation:   "write_trace",
+		BatchSize:   1,
+		FailedCount: 1,
+		Err:         errors.New("database is locked"),
+	})
+	writer.reportWriteFailure(WriteFailure{
+		Operation:   "write_trace",
+		BatchSize:   1,
+		FailedCount: 1,
+		Err:         errors.New("duplicate key value"),
+	})
+	writer.reportWriteFailure(WriteFailure{
+		Operation:   "write_trace",
+		BatchSize:   1,
+		FailedCount: 2,
+		Err:         errors.New("dial tcp 127.0.0.1: connection refused"),
+	})
+
+	snapshot := writer.TracePipelineDiagnostics()
+	if snapshot.WriteDroppedTotal != 4 {
+		t.Fatalf("write_dropped_total=%d, want 4", snapshot.WriteDroppedTotal)
+	}
+	if snapshot.WriteFailuresByClass == nil {
+		t.Fatal("write_failures_by_class should be populated")
+	}
+	if snapshot.WriteFailuresByClass[WriteErrorClassContention] != 1 {
+		t.Fatalf("contention=%d, want 1", snapshot.WriteFailuresByClass[WriteErrorClassContention])
+	}
+	if snapshot.WriteFailuresByClass[WriteErrorClassConstraint] != 1 {
+		t.Fatalf("constraint=%d, want 1", snapshot.WriteFailuresByClass[WriteErrorClassConstraint])
+	}
+	if snapshot.WriteFailuresByClass[WriteErrorClassConnection] != 2 {
+		t.Fatalf("connection=%d, want 2", snapshot.WriteFailuresByClass[WriteErrorClassConnection])
+	}
+	if _, ok := snapshot.WriteFailuresByClass[WriteErrorClassUnknown]; ok {
+		t.Fatalf("unknown should not be present, got %d", snapshot.WriteFailuresByClass[WriteErrorClassUnknown])
+	}
+}
+
+func TestWriterWriteFailureIncludesErrorClass(t *testing.T) {
+	t.Parallel()
+
+	store := &flakyStore{failFirst: 1}
+	writer := NewWriter(store, 8)
+	writeFailures := make(chan WriteFailure, 4)
+	writer.SetWriteFailureHandler(func(failure WriteFailure) {
+		writeFailures <- failure
+	})
+	writer.Start(context.Background())
+
+	if !writer.Enqueue(&Trace{ID: "trace"}) {
+		t.Fatal("enqueue failed")
+	}
+	writer.Stop()
+
+	select {
+	case failure := <-writeFailures:
+		if failure.ErrorClass == "" {
+			t.Fatal("ErrorClass should be populated")
+		}
+		if failure.ErrorClass != WriteErrorClassUnknown {
+			t.Fatalf("ErrorClass=%q, want %q", failure.ErrorClass, WriteErrorClassUnknown)
+		}
+	default:
+		t.Fatal("expected at least one write failure signal")
+	}
+}
+
 func TestWriterStopIsIdempotentWithoutStart(t *testing.T) {
 	t.Parallel()
 
@@ -490,5 +758,91 @@ func TestWriterStopIsIdempotentWithoutStart(t *testing.T) {
 
 	if writer.Enqueue(&Trace{ID: "after-stop"}) {
 		t.Fatal("enqueue should fail after stop")
+	}
+}
+
+func TestWriterQueueCap(t *testing.T) {
+	t.Parallel()
+
+	writer := NewWriter(&testStore{}, 16)
+	if got := writer.QueueCap(); got != 16 {
+		t.Fatalf("QueueCap()=%d, want 16", got)
+	}
+}
+
+func TestWriterMetricsOnWriteSuccessCalledOnSuccess(t *testing.T) {
+	t.Parallel()
+
+	store := &testStore{}
+	writer := NewWriter(store, 8)
+
+	var successCount int64
+	writer.SetMetrics(&WriterMetrics{
+		OnWriteSuccess: func(count int) { atomic.AddInt64(&successCount, int64(count)) },
+	})
+
+	writer.Start(context.Background())
+	for i := 0; i < 5; i++ {
+		if !writer.Enqueue(&Trace{ID: "trace"}) {
+			t.Fatalf("enqueue failed at index %d", i)
+		}
+	}
+	writer.Stop()
+
+	if got := atomic.LoadInt64(&successCount); got != 5 {
+		t.Fatalf("OnWriteSuccess total=%d, want 5", got)
+	}
+}
+
+func TestWriterMetricsOnWriteSuccessNotCalledOnFailure(t *testing.T) {
+	t.Parallel()
+
+	store := &alwaysFailStore{}
+	writer := NewWriter(store, 8)
+
+	var successCount int64
+	writer.SetMetrics(&WriterMetrics{
+		OnWriteSuccess: func(count int) { atomic.AddInt64(&successCount, int64(count)) },
+	})
+
+	writer.Start(context.Background())
+	for i := 0; i < 3; i++ {
+		writer.Enqueue(&Trace{ID: "trace"})
+	}
+	writer.Stop()
+
+	if got := atomic.LoadInt64(&successCount); got != 0 {
+		t.Fatalf("OnWriteSuccess total=%d, want 0", got)
+	}
+}
+
+func TestWriterMetricsOnWriteSuccessPartialBatchFallback(t *testing.T) {
+	t.Parallel()
+
+	// flakyStore: WriteBatch always fails, WriteTrace fails for the first failFirst items.
+	store := &flakyStore{failFirst: 1}
+	writer := NewWriter(store, 8)
+
+	var successCount int64
+	writer.SetMetrics(&WriterMetrics{
+		OnWriteSuccess: func(count int) { atomic.AddInt64(&successCount, int64(count)) },
+	})
+
+	writer.Start(context.Background())
+	for i := 0; i < 4; i++ {
+		if !writer.Enqueue(&Trace{ID: "trace"}) {
+			t.Fatalf("enqueue failed at index %d", i)
+		}
+	}
+	writer.Stop()
+
+	// The first item fails individual write, remaining 3 succeed.
+	// Exact count depends on batching; at minimum some succeed and the failed ones don't count.
+	got := atomic.LoadInt64(&successCount)
+	if got <= 0 {
+		t.Fatalf("OnWriteSuccess total=%d, want >0", got)
+	}
+	if got > 4 {
+		t.Fatalf("OnWriteSuccess total=%d, want <=4", got)
 	}
 }
