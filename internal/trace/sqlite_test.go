@@ -646,6 +646,217 @@ func TestSQLiteStoreAnalyticsQueries(t *testing.T) {
 	if costSeries[1].Group != "openai" || math.Abs(costSeries[1].TotalCostUSD-0.003) > 1e-12 {
 		t.Fatalf("cost series second point=%+v", costSeries[1])
 	}
+	if costSeries[0].RequestCount != 1 {
+		t.Fatalf("cost series anthropic request_count=%d, want 1", costSeries[0].RequestCount)
+	}
+	if costSeries[1].RequestCount != 2 {
+		t.Fatalf("cost series openai request_count=%d, want 2", costSeries[1].RequestCount)
+	}
+	if math.Abs(costSeries[1].AvgCostUSD-0.0015) > 1e-12 {
+		t.Fatalf("cost series openai avg_cost=%f, want 0.0015", costSeries[1].AvgCostUSD)
+	}
+}
+
+func TestSQLiteStoreLatencyPercentiles(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "latency.db")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer store.Close()
+
+	base := time.Date(2026, 2, 12, 4, 0, 0, 0, time.UTC)
+	// Create traces with varied latencies across two providers
+	latencies := []struct {
+		id        string
+		provider  string
+		latencyMS int64
+		status    int
+	}{
+		{"lat-1", "openai", 50, 200},
+		{"lat-2", "openai", 100, 200},
+		{"lat-3", "openai", 150, 400},
+		{"lat-4", "openai", 200, 200},
+		{"lat-5", "openai", 500, 500},
+		{"lat-6", "anthropic", 80, 200},
+		{"lat-7", "anthropic", 120, 429},
+		{"lat-8", "anthropic", 300, 502},
+	}
+	for i, l := range latencies {
+		if err := store.WriteTrace(context.Background(), &Trace{
+			ID:             l.id,
+			Timestamp:      base.Add(time.Duration(i) * time.Second),
+			Provider:       l.provider,
+			Model:          "test-model",
+			RequestMethod:  "POST",
+			RequestPath:    "/" + l.provider + "/v1/chat/completions",
+			ResponseStatus: l.status,
+			LatencyMS:      l.latencyMS,
+			GatewayKeyID:   "gw-test",
+			CreatedAt:      base.Add(time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatalf("WriteTrace(%s) error: %v", l.id, err)
+		}
+	}
+
+	// Test latency percentiles grouped by provider
+	stats, err := store.GetLatencyPercentiles(context.Background(), AnalyticsFilter{}, "provider")
+	if err != nil {
+		t.Fatalf("GetLatencyPercentiles() error: %v", err)
+	}
+	if len(stats) != 2 {
+		t.Fatalf("latency stats count=%d, want 2", len(stats))
+	}
+
+	// anthropic comes first alphabetically
+	if stats[0].Group != "anthropic" || stats[0].RequestCount != 3 {
+		t.Fatalf("first latency group=%+v, want anthropic with 3 requests", stats[0])
+	}
+	if stats[0].MinMS != 80 || stats[0].MaxMS != 300 {
+		t.Fatalf("anthropic min/max=%d/%d, want 80/300", stats[0].MinMS, stats[0].MaxMS)
+	}
+
+	// openai has 5 requests
+	if stats[1].Group != "openai" || stats[1].RequestCount != 5 {
+		t.Fatalf("second latency group=%+v, want openai with 5 requests", stats[1])
+	}
+	if stats[1].MinMS != 50 || stats[1].MaxMS != 500 {
+		t.Fatalf("openai min/max=%d/%d, want 50/500", stats[1].MinMS, stats[1].MaxMS)
+	}
+	// openai sorted: [50, 100, 150, 200, 500], p50=index 2=150
+	if math.Abs(stats[1].P50MS-150.0) > 1e-6 {
+		t.Fatalf("openai p50=%f, want 150", stats[1].P50MS)
+	}
+
+	// Test without grouping
+	allStats, err := store.GetLatencyPercentiles(context.Background(), AnalyticsFilter{}, "")
+	if err != nil {
+		t.Fatalf("GetLatencyPercentiles(no group) error: %v", err)
+	}
+	if len(allStats) != 1 || allStats[0].RequestCount != 8 {
+		t.Fatalf("ungrouped latency stats=%+v, want 1 group with 8 requests", allStats)
+	}
+
+	// Test with route grouping
+	routeStats, err := store.GetLatencyPercentiles(context.Background(), AnalyticsFilter{}, "route")
+	if err != nil {
+		t.Fatalf("GetLatencyPercentiles(route) error: %v", err)
+	}
+	if len(routeStats) != 2 {
+		t.Fatalf("route latency stats count=%d, want 2", len(routeStats))
+	}
+}
+
+func TestSQLiteStoreErrorRateBreakdown(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "errors.db")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer store.Close()
+
+	base := time.Date(2026, 2, 12, 5, 0, 0, 0, time.UTC)
+	traces := []struct {
+		id       string
+		provider string
+		status   int
+	}{
+		{"err-1", "openai", 200},
+		{"err-2", "openai", 200},
+		{"err-3", "openai", 400},
+		{"err-4", "openai", 429},
+		{"err-5", "openai", 500},
+		{"err-6", "anthropic", 200},
+		{"err-7", "anthropic", 200},
+		{"err-8", "anthropic", 502},
+	}
+	for i, tr := range traces {
+		if err := store.WriteTrace(context.Background(), &Trace{
+			ID:             tr.id,
+			Timestamp:      base.Add(time.Duration(i) * time.Second),
+			Provider:       tr.provider,
+			Model:          "test-model",
+			RequestMethod:  "POST",
+			RequestPath:    "/" + tr.provider + "/v1/chat/completions",
+			ResponseStatus: tr.status,
+			LatencyMS:      100,
+			CreatedAt:      base.Add(time.Duration(i) * time.Second),
+		}); err != nil {
+			t.Fatalf("WriteTrace(%s) error: %v", tr.id, err)
+		}
+	}
+
+	stats, err := store.GetErrorRateBreakdown(context.Background(), AnalyticsFilter{}, "provider")
+	if err != nil {
+		t.Fatalf("GetErrorRateBreakdown() error: %v", err)
+	}
+	if len(stats) != 2 {
+		t.Fatalf("error rate stats count=%d, want 2", len(stats))
+	}
+
+	// openai has more total requests so it comes first (ordered by total DESC)
+	if stats[0].Group != "openai" || stats[0].TotalRequests != 5 {
+		t.Fatalf("first error rate group=%+v, want openai with 5 requests", stats[0])
+	}
+	if stats[0].ErrorCount4xx != 2 || stats[0].ErrorCount5xx != 1 {
+		t.Fatalf("openai 4xx/5xx=%d/%d, want 2/1", stats[0].ErrorCount4xx, stats[0].ErrorCount5xx)
+	}
+	expectedRate := 3.0 / 5.0
+	if math.Abs(stats[0].ErrorRate-expectedRate) > 1e-12 {
+		t.Fatalf("openai error rate=%f, want %f", stats[0].ErrorRate, expectedRate)
+	}
+
+	if stats[1].Group != "anthropic" || stats[1].TotalRequests != 3 {
+		t.Fatalf("second error rate group=%+v, want anthropic with 3 requests", stats[1])
+	}
+	if stats[1].ErrorCount4xx != 0 || stats[1].ErrorCount5xx != 1 {
+		t.Fatalf("anthropic 4xx/5xx=%d/%d, want 0/1", stats[1].ErrorCount4xx, stats[1].ErrorCount5xx)
+	}
+
+	// Test without grouping
+	allStats, err := store.GetErrorRateBreakdown(context.Background(), AnalyticsFilter{}, "")
+	if err != nil {
+		t.Fatalf("GetErrorRateBreakdown(no group) error: %v", err)
+	}
+	if len(allStats) != 1 || allStats[0].TotalRequests != 8 {
+		t.Fatalf("ungrouped error rate stats=%+v, want 1 group with 8 requests", allStats)
+	}
+	if allStats[0].ErrorCount4xx != 2 || allStats[0].ErrorCount5xx != 2 {
+		t.Fatalf("ungrouped 4xx/5xx=%d/%d, want 2/2", allStats[0].ErrorCount4xx, allStats[0].ErrorCount5xx)
+	}
+}
+
+func TestPercentileFromSorted(t *testing.T) {
+	t.Parallel()
+
+	// Empty slice
+	if v := percentileFromSorted(nil, 0.5); v != 0 {
+		t.Fatalf("empty p50=%f, want 0", v)
+	}
+
+	// Single element
+	if v := percentileFromSorted([]int64{100}, 0.99); v != 100 {
+		t.Fatalf("single p99=%f, want 100", v)
+	}
+
+	// Five elements: [10, 20, 30, 40, 50]
+	sorted := []int64{10, 20, 30, 40, 50}
+	p50 := percentileFromSorted(sorted, 0.50)
+	if math.Abs(p50-30.0) > 1e-6 {
+		t.Fatalf("p50=%f, want 30", p50)
+	}
+	p0 := percentileFromSorted(sorted, 0.0)
+	if math.Abs(p0-10.0) > 1e-6 {
+		t.Fatalf("p0=%f, want 10", p0)
+	}
+	p100 := percentileFromSorted(sorted, 1.0)
+	if math.Abs(p100-50.0) > 1e-6 {
+		t.Fatalf("p100=%f, want 50", p100)
+	}
 }
 
 func TestSQLiteStoreWriteTraceConcurrentWriters(t *testing.T) {

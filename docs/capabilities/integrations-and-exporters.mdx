@@ -20,13 +20,18 @@ It covers current export surfaces and practical pull-based integration patterns.
 - Emits structured JSON logs to stdout for request lifecycle and audit events.
 - Persists trace records to SQLite or Postgres for downstream reporting jobs.
 - Optionally exports gateway spans and metrics with native OpenTelemetry OTLP HTTP.
-- OpenTelemetry spans include gateway tenant identity attributes (`org_id`,
-  `workspace_id`, `key_id`) when auth is enabled.
+- Exposes a native Prometheus `/metrics` scrape endpoint when
+  `prometheus_enabled: true`.
+- OpenTelemetry spans and metrics use normalized request-scope attributes:
+  `provider`, `model`, `org_id`, `workspace_id`, and `route`.
+- When auth is enabled and identity is present, spans also include `key_id`
+  and `role`.
 - Supports browser-based integration clients with CORS headers on API routes.
 
 ## Operational fit
 
-- You need external usage and cost dashboards from gateway trace data.
+- You need external usage, cost, latency, and error dashboards from gateway
+  trace data.
 - You need centralized audit and auth-deny visibility in your log pipeline.
 - You need export behavior that does not block proxy request forwarding.
 
@@ -35,7 +40,8 @@ It covers current export surfaces and practical pull-based integration patterns.
 1. Proxy traffic is captured and written asynchronously to trace storage.
 2. API routes under `/api/...` read from storage and return JSON responses.
 3. `/api/traces` supports filtered and cursor-based pull exports.
-4. `/api/analytics/*` exposes usage, cost, model, key, and summary aggregates.
+4. `/api/analytics/*` exposes usage, cost, model, key, latency, error-rate, and
+   summary aggregates.
 5. Gateway logs are emitted as JSON lines to stdout and can be shipped by your
    log collector.
 6. If `auth.enabled=true`, integration readers must use a gateway key with
@@ -69,6 +75,8 @@ observability:
     sampling_ratio: 1.0
     export_timeout_ms: 3000
     metric_export_interval_ms: 10000
+    # prometheus_enabled: false
+    # prometheus_path: /metrics
 ```
 
 With `capture_bodies=false`, your integrations still get usage, latency, and
@@ -165,13 +173,20 @@ You should see:
 - Cause: Collector parser is not configured for newline-delimited JSON.
 - Fix: Configure the collector source as JSON line input for gateway stdout.
 
-### Expected Prometheus or OpenTelemetry exporter endpoint is missing
+### Prometheus `/metrics` returns 404
 
-- Symptom: Requests to `/metrics` or OTLP exporter targets fail.
-- Cause: `/metrics` is not implemented as a native Prometheus scrape endpoint,
-  or OpenTelemetry export is disabled/misconfigured.
-- Fix: For Prometheus, use a collector bridge (OTLP -> Prometheus). For OTEL,
-  set `observability.otel.enabled=true` and verify
+- Symptom: Requests to `/metrics` return `404`.
+- Cause: `prometheus_enabled` is not set to `true`.
+- Fix: Set `observability.otel.prometheus_enabled: true` in YAML or
+  `ONGOINGAI_PROMETHEUS_ENABLED=true` as an env var. Verify that
+  `prometheus_path` matches the requested path.
+
+### OTLP exporter targets fail
+
+- Symptom: OTLP export errors in gateway logs.
+- Cause: OpenTelemetry export is disabled or the collector endpoint is
+  unreachable.
+- Fix: Set `observability.otel.enabled=true` and verify
   `observability.otel.endpoint` reachability.
 
 ## Next steps

@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -16,6 +17,9 @@ import (
 	"github.com/ongoingai/gateway/internal/correlation"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/exemplar"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
@@ -143,6 +147,9 @@ func TestSpanEnrichmentMiddleware(t *testing.T) {
 			wantError: true,
 			wantAttrs: map[string]string{
 				"gateway.correlation_id": "corr-otel-1",
+				"gateway.provider":       "openai",
+				"gateway.model":          "unknown",
+				"gateway.route":          "/openai/*",
 				"gateway.org_id":         "org-test",
 				"gateway.workspace_id":   "workspace-test",
 				"gateway.key_id":         "gwk_test_1",
@@ -160,6 +167,9 @@ func TestSpanEnrichmentMiddleware(t *testing.T) {
 			},
 			wantError: false,
 			wantAttrs: map[string]string{
+				"gateway.provider":     "openai",
+				"gateway.model":        "unknown",
+				"gateway.route":        "/openai/*",
 				"gateway.org_id":       "org-ok",
 				"gateway.workspace_id": "workspace-ok",
 				"gateway.key_id":       "gwk_test_2",
@@ -175,8 +185,12 @@ func TestSpanEnrichmentMiddleware(t *testing.T) {
 			},
 			wantError: false,
 			wantAttrs: map[string]string{
-				"gateway.org_id": "org-notfound",
-				"gateway.key_id": "gwk_test_3",
+				"gateway.provider":     "openai",
+				"gateway.model":        "unknown",
+				"gateway.route":        "/openai/*",
+				"gateway.org_id":       "org-notfound",
+				"gateway.workspace_id": "unknown",
+				"gateway.key_id":       "gwk_test_3",
 			},
 		},
 		{
@@ -185,14 +199,27 @@ func TestSpanEnrichmentMiddleware(t *testing.T) {
 			identity:      nil,
 			correlationID: "corr-otel-2",
 			wantError:     true,
-			wantAttrs:     map[string]string{"gateway.correlation_id": "corr-otel-2"},
+			wantAttrs: map[string]string{
+				"gateway.correlation_id": "corr-otel-2",
+				"gateway.provider":       "openai",
+				"gateway.model":          "unknown",
+				"gateway.route":          "/openai/*",
+				"gateway.org_id":         "unknown",
+				"gateway.workspace_id":   "unknown",
+			},
 		},
 		{
 			name:       "partial identity emits only populated fields",
 			statusCode: http.StatusOK,
 			identity:   &auth.Identity{OrgID: "org-only"},
 			wantError:  false,
-			wantAttrs:  map[string]string{"gateway.org_id": "org-only"},
+			wantAttrs: map[string]string{
+				"gateway.provider":     "openai",
+				"gateway.model":        "unknown",
+				"gateway.route":        "/openai/*",
+				"gateway.org_id":       "org-only",
+				"gateway.workspace_id": "unknown",
+			},
 		},
 		{
 			name:       "whitespace-only identity fields are omitted",
@@ -204,7 +231,13 @@ func TestSpanEnrichmentMiddleware(t *testing.T) {
 				Role:        "  ",
 			},
 			wantError: false,
-			wantAttrs: nil,
+			wantAttrs: map[string]string{
+				"gateway.provider":     "openai",
+				"gateway.model":        "unknown",
+				"gateway.route":        "/openai/*",
+				"gateway.org_id":       "unknown",
+				"gateway.workspace_id": "unknown",
+			},
 		},
 	}
 
@@ -268,6 +301,350 @@ func TestSpanEnrichmentMiddleware(t *testing.T) {
 	}
 }
 
+func TestRecordTraceWriteFailureIncludesMetricAttributes(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	counter, err := meterProvider.Meter("test").Int64Counter("test.trace.write_failed_total")
+	if err != nil {
+		t.Fatalf("Int64Counter() error: %v", err)
+	}
+
+	runtime := &Runtime{
+		enabled:                 true,
+		traceWriteFailedCounter: counter,
+	}
+
+	runtime.RecordTraceWriteFailure("write_batch_fallback", 3, "timeout", "postgres")
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	found := false
+	var dataPoint metricdata.DataPoint[int64]
+	for _, scope := range metrics.ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			if metric.Name != "test.trace.write_failed_total" {
+				continue
+			}
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric data type=%T, want metricdata.Sum[int64]", metric.Data)
+			}
+			if len(sum.DataPoints) != 1 {
+				t.Fatalf("datapoints=%d, want 1", len(sum.DataPoints))
+			}
+			dataPoint = sum.DataPoints[0]
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing test.trace.write_failed_total metric")
+	}
+	if dataPoint.Value != 3 {
+		t.Fatalf("value=%d, want 3", dataPoint.Value)
+	}
+
+	gotAttrs := make(map[string]string)
+	for _, kv := range dataPoint.Attributes.ToSlice() {
+		gotAttrs[string(kv.Key)] = kv.Value.AsString()
+	}
+	wantAttrs := map[string]string{
+		"operation":   "write_batch_fallback",
+		"error_class": "timeout",
+		"store":       "postgres",
+	}
+	for key, want := range wantAttrs {
+		if got := gotAttrs[key]; got != want {
+			t.Fatalf("attribute %q=%q, want %q", key, got, want)
+		}
+	}
+	for key, value := range gotAttrs {
+		if _, ok := wantAttrs[key]; !ok {
+			t.Fatalf("unexpected attribute %q=%q", key, value)
+		}
+	}
+}
+
+func TestRecordTraceQueueDropIncludesTenantAttributes(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	counter, err := meterProvider.Meter("test").Int64Counter("test.trace.queue_dropped_total")
+	if err != nil {
+		t.Fatalf("Int64Counter() error: %v", err)
+	}
+
+	runtime := &Runtime{
+		enabled:                  true,
+		traceQueueDroppedCounter: counter,
+	}
+
+	runtime.RecordTraceQueueDrop("openai", "gpt-4o", "org-drop", "ws-drop", "/openai/v1/chat/completions", 502)
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	found := false
+	var dataPoint metricdata.DataPoint[int64]
+	for _, scope := range metrics.ScopeMetrics {
+		for _, metric := range scope.Metrics {
+			if metric.Name != "test.trace.queue_dropped_total" {
+				continue
+			}
+			sum, ok := metric.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric data type=%T, want metricdata.Sum[int64]", metric.Data)
+			}
+			if len(sum.DataPoints) != 1 {
+				t.Fatalf("datapoints=%d, want 1", len(sum.DataPoints))
+			}
+			dataPoint = sum.DataPoints[0]
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing test.trace.queue_dropped_total metric")
+	}
+	if dataPoint.Value != 1 {
+		t.Fatalf("value=%d, want 1", dataPoint.Value)
+	}
+
+	gotAttrs := make(map[string]string)
+	for _, kv := range dataPoint.Attributes.ToSlice() {
+		gotAttrs[string(kv.Key)] = kv.Value.Emit()
+	}
+	wantAttrs := map[string]string{
+		"provider":     "openai",
+		"model":        "gpt-4o",
+		"org_id":       "org-drop",
+		"workspace_id": "ws-drop",
+		"route":        "/openai/*",
+		"status_code":  "502",
+	}
+	for key, want := range wantAttrs {
+		if got := gotAttrs[key]; got != want {
+			t.Fatalf("attribute %q=%q, want %q", key, got, want)
+		}
+	}
+	for key, value := range gotAttrs {
+		if _, ok := wantAttrs[key]; !ok {
+			t.Fatalf("unexpected attribute %q=%q", key, value)
+		}
+	}
+}
+
+func TestRecordProviderRequestIncludesMetricAttributes(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	meter := meterProvider.Meter("test")
+	counter, err := meter.Int64Counter("test.provider.request_total")
+	if err != nil {
+		t.Fatalf("Int64Counter() error: %v", err)
+	}
+	histogram, err := meter.Float64Histogram("test.provider.request_duration_seconds")
+	if err != nil {
+		t.Fatalf("Float64Histogram() error: %v", err)
+	}
+
+	runtime := &Runtime{
+		enabled:                          true,
+		providerRequestCounter:           counter,
+		providerRequestDurationHistogram: histogram,
+	}
+
+	runtime.RecordProviderRequest(context.Background(), "openai", "gpt-4o", "org-provider", "ws-provider", "/openai/v1/chat/completions", 200, 1250)
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	var counterFound, histogramFound bool
+	for _, scope := range metrics.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			switch m.Name {
+			case "test.provider.request_total":
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("counter data type=%T, want metricdata.Sum[int64]", m.Data)
+				}
+				if len(sum.DataPoints) != 1 {
+					t.Fatalf("counter datapoints=%d, want 1", len(sum.DataPoints))
+				}
+				dp := sum.DataPoints[0]
+				if dp.Value != 1 {
+					t.Fatalf("counter value=%d, want 1", dp.Value)
+				}
+				gotAttrs := make(map[string]string)
+				for _, kv := range dp.Attributes.ToSlice() {
+					gotAttrs[string(kv.Key)] = kv.Value.Emit()
+				}
+				wantAttrs := map[string]string{
+					"provider":     "openai",
+					"model":        "gpt-4o",
+					"org_id":       "org-provider",
+					"workspace_id": "ws-provider",
+					"route":        "/openai/*",
+					"status_code":  "200",
+				}
+				for key, want := range wantAttrs {
+					if got := gotAttrs[key]; got != want {
+						t.Fatalf("counter attribute %q=%q, want %q", key, got, want)
+					}
+				}
+				for key, value := range gotAttrs {
+					if _, ok := wantAttrs[key]; !ok {
+						t.Fatalf("unexpected counter attribute %q=%q", key, value)
+					}
+				}
+				counterFound = true
+
+			case "test.provider.request_duration_seconds":
+				hist, ok := m.Data.(metricdata.Histogram[float64])
+				if !ok {
+					t.Fatalf("histogram data type=%T, want metricdata.Histogram[float64]", m.Data)
+				}
+				if len(hist.DataPoints) != 1 {
+					t.Fatalf("histogram datapoints=%d, want 1", len(hist.DataPoints))
+				}
+				dp := hist.DataPoints[0]
+				if dp.Count != 1 {
+					t.Fatalf("histogram count=%d, want 1", dp.Count)
+				}
+				// 1250ms = 1.25s
+				wantSum := 1.25
+				if dp.Sum < wantSum-0.001 || dp.Sum > wantSum+0.001 {
+					t.Fatalf("histogram sum=%f, want ~%f", dp.Sum, wantSum)
+				}
+				gotAttrs := make(map[string]string)
+				for _, kv := range dp.Attributes.ToSlice() {
+					gotAttrs[string(kv.Key)] = kv.Value.Emit()
+				}
+				wantAttrs := map[string]string{
+					"provider":     "openai",
+					"model":        "gpt-4o",
+					"org_id":       "org-provider",
+					"workspace_id": "ws-provider",
+					"route":        "/openai/*",
+				}
+				for key, want := range wantAttrs {
+					if got := gotAttrs[key]; got != want {
+						t.Fatalf("histogram attribute %q=%q, want %q", key, got, want)
+					}
+				}
+				for key, value := range gotAttrs {
+					if _, ok := wantAttrs[key]; !ok {
+						t.Fatalf("unexpected histogram attribute %q=%q", key, value)
+					}
+				}
+				histogramFound = true
+			}
+		}
+	}
+	if !counterFound {
+		t.Fatal("missing test.provider.request_total metric")
+	}
+	if !histogramFound {
+		t.Fatal("missing test.provider.request_duration_seconds metric")
+	}
+}
+
+func TestRecordProviderRequestScrubsCredentialLikeModelLabel(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	counter, err := meterProvider.Meter("test").Int64Counter("test.provider.request_total")
+	if err != nil {
+		t.Fatalf("Int64Counter() error: %v", err)
+	}
+
+	runtime := &Runtime{
+		enabled:                true,
+		providerRequestCounter: counter,
+	}
+
+	runtime.RecordProviderRequest(
+		context.Background(),
+		"openai",
+		"sk_live_abc123def456ghi789",
+		"org-provider",
+		"ws-provider",
+		"/openai/v1/chat/completions",
+		200,
+		1250,
+	)
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	found := false
+	for _, scope := range metrics.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "test.provider.request_total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("counter data type=%T, want metricdata.Sum[int64]", m.Data)
+			}
+			if len(sum.DataPoints) != 1 {
+				t.Fatalf("counter datapoints=%d, want 1", len(sum.DataPoints))
+			}
+			attrs := make(map[string]string)
+			for _, kv := range sum.DataPoints[0].Attributes.ToSlice() {
+				attrs[string(kv.Key)] = kv.Value.Emit()
+			}
+			got := attrs["model"]
+			if ContainsCredential(got) {
+				t.Fatalf("model label contains credential: %q", got)
+			}
+			if got != "[CREDENTIAL_REDACTED]" {
+				t.Fatalf("model label=%q, want %q", got, "[CREDENTIAL_REDACTED]")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing test.provider.request_total metric")
+	}
+}
+
 // Cannot be parallel: mutates global OTel providers.
 //
 // The config uses Insecure: false with an http:// endpoint URL, which
@@ -320,8 +697,8 @@ func TestSetupExportsTracesAndMetrics(t *testing.T) {
 
 	_, span := otel.Tracer("test").Start(context.Background(), "gateway.test")
 	span.End()
-	runtime.RecordTraceQueueDrop("/openai/v1/chat/completions", http.StatusBadGateway)
-	runtime.RecordTraceWriteFailure("write_trace", 2)
+	runtime.RecordTraceQueueDrop("openai", "gpt-4o", "org-test", "ws-test", "/openai/v1/chat/completions", http.StatusBadGateway)
+	runtime.RecordTraceWriteFailure("write_trace", 2, "unknown", "sqlite")
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -448,8 +825,19 @@ func TestRuntimeGuardsDoNotPanic(t *testing.T) {
 				t.Fatal("WrapHTTPTransport should return base transport unchanged")
 			}
 
-			tt.runtime.RecordTraceQueueDrop("/openai/v1/chat", 502)
-			tt.runtime.RecordTraceWriteFailure("write_trace", 5)
+			tt.runtime.RecordTraceQueueDrop("openai", "gpt-4o", "org-1", "ws-1", "/openai/v1/chat", 502)
+			tt.runtime.RecordTraceWriteFailure("write_trace", 5, "unknown", "sqlite")
+			tt.runtime.RecordTraceEnqueued()
+			tt.runtime.RecordTraceWritten(3)
+			tt.runtime.RecordTraceFlush(10, 50*time.Millisecond)
+			tt.runtime.RecordProviderRequest(context.Background(), "openai", "gpt-4o", "org-1", "ws-1", "/openai/v1/chat", 200, 1000)
+			tt.runtime.RecordProxyRequest(context.Background(), "openai", "gpt-4o", "org-1", "ws-1", "/openai/v1/chat", 200, 1000)
+			tt.runtime.RegisterTraceQueueDepthGauge(func() int { return 0 })
+			tt.runtime.RegisterTraceQueueCapacityGauge(func() int { return 256 })
+
+			if tt.runtime.PrometheusHandler() != nil {
+				t.Fatal("PrometheusHandler() should be nil when disabled")
+			}
 
 			if err := tt.runtime.Shutdown(context.Background()); err != nil {
 				t.Fatalf("Shutdown() error: %v", err)
@@ -565,7 +953,7 @@ func TestSetupConfigPermutations(t *testing.T) {
 			t.Fatalf("Setup() error: %v", err)
 		}
 
-		runtime.RecordTraceQueueDrop("/openai/v1/chat", 502)
+		runtime.RecordTraceQueueDrop("openai", "gpt-4o", "org-1", "ws-1", "/openai/v1/chat", 502)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -580,4 +968,1172 @@ func TestSetupConfigPermutations(t *testing.T) {
 			t.Fatal("unexpected trace export requests when TracesEnabled=false")
 		}
 	})
+}
+
+// Cannot be parallel: mutates global OTel providers.
+func TestRecordTraceEnqueuedAndFlushMetrics(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	oldMP := otel.GetMeterProvider()
+	oldProp := otel.GetTextMapPropagator()
+	defer func() {
+		otel.SetTracerProvider(oldTP)
+		otel.SetMeterProvider(oldMP)
+		otel.SetTextMapPropagator(oldProp)
+	}()
+
+	var metricRequests atomic.Int64
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		if r.URL.Path == "/v1/metrics" {
+			metricRequests.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
+	runtime, err := Setup(context.Background(), config.OTelConfig{
+		Enabled:                true,
+		Endpoint:               collector.URL,
+		ServiceName:            "test-trace-pipeline-metrics",
+		TracesEnabled:          false,
+		MetricsEnabled:         true,
+		SamplingRatio:          1.0,
+		ExportTimeoutMS:        1000,
+		MetricExportIntervalMS: 25,
+	}, "test", nil)
+	if err != nil {
+		t.Fatalf("Setup() error: %v", err)
+	}
+
+	// Exercise all new recording methods.
+	runtime.RecordTraceEnqueued()
+	runtime.RecordTraceEnqueued()
+	runtime.RecordTraceFlush(5, 10*time.Millisecond)
+	runtime.RegisterTraceQueueDepthGauge(func() int { return 3 })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := runtime.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error: %v", err)
+	}
+
+	waitFor(t, 2*time.Second, func() bool {
+		return metricRequests.Load() > 0
+	})
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestWrapAuthMiddlewareAllowSetsSpanAttributes(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := runtime.WrapAuthMiddleware(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", nil)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	span := spans[0]
+	if span.Name() != "gateway.auth" {
+		t.Fatalf("span name=%q, want %q", span.Name(), "gateway.auth")
+	}
+	if span.Status().Code == codes.Error {
+		t.Fatal("span status should not be error for allow")
+	}
+	attrs := spanAttrMap(span)
+	if got := attrs["gateway.auth.result"]; got != "allow" {
+		t.Fatalf("gateway.auth.result=%q, want %q", got, "allow")
+	}
+	if got := attrs["gateway.provider"]; got != "openai" {
+		t.Fatalf("gateway.provider=%q, want %q", got, "openai")
+	}
+	if got := attrs["gateway.model"]; got != "unknown" {
+		t.Fatalf("gateway.model=%q, want %q", got, "unknown")
+	}
+	if got := attrs["gateway.route"]; got != "/openai/*" {
+		t.Fatalf("gateway.route=%q, want %q", got, "/openai/*")
+	}
+	if got := attrs["gateway.org_id"]; got != "unknown" {
+		t.Fatalf("gateway.org_id=%q, want %q", got, "unknown")
+	}
+	if got := attrs["gateway.workspace_id"]; got != "unknown" {
+		t.Fatalf("gateway.workspace_id=%q, want %q", got, "unknown")
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestWrapAuthMiddlewareDenySetsSpanAttributes(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	})
+	handler := runtime.WrapAuthMiddleware(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", nil)
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	span := spans[0]
+	if span.Status().Code != codes.Error {
+		t.Fatalf("span status=%v, want %v", span.Status().Code, codes.Error)
+	}
+	attrs := spanAttrMap(span)
+	if got := attrs["gateway.auth.result"]; got != "deny" {
+		t.Fatalf("gateway.auth.result=%q, want %q", got, "deny")
+	}
+	if got := attrs["gateway.auth.deny_reason"]; got != "forbidden" {
+		t.Fatalf("gateway.auth.deny_reason=%q, want %q", got, "forbidden")
+	}
+	if got := attrs["gateway.provider"]; got != "openai" {
+		t.Fatalf("gateway.provider=%q, want %q", got, "openai")
+	}
+	if got := attrs["gateway.model"]; got != "unknown" {
+		t.Fatalf("gateway.model=%q, want %q", got, "unknown")
+	}
+	if got := attrs["gateway.route"]; got != "/openai/*" {
+		t.Fatalf("gateway.route=%q, want %q", got, "/openai/*")
+	}
+	if got := attrs["gateway.org_id"]; got != "unknown" {
+		t.Fatalf("gateway.org_id=%q, want %q", got, "unknown")
+	}
+	if got := attrs["gateway.workspace_id"]; got != "unknown" {
+		t.Fatalf("gateway.workspace_id=%q, want %q", got, "unknown")
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestWrapRouteSpanSetsProviderAttributes(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := runtime.WrapRouteSpan(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", nil)
+	req = req.WithContext(auth.WithIdentity(req.Context(), &auth.Identity{
+		OrgID:       "org-route",
+		WorkspaceID: "ws-route",
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	span := spans[0]
+	if span.Name() != "gateway.route" {
+		t.Fatalf("span name=%q, want %q", span.Name(), "gateway.route")
+	}
+	attrs := spanAttrMap(span)
+	if got := attrs["gateway.route.provider"]; got != "openai" {
+		t.Fatalf("gateway.route.provider=%q, want %q", got, "openai")
+	}
+	if got := attrs["gateway.route.prefix"]; got != "/openai" {
+		t.Fatalf("gateway.route.prefix=%q, want %q", got, "/openai")
+	}
+	if got := attrs["gateway.provider"]; got != "openai" {
+		t.Fatalf("gateway.provider=%q, want %q", got, "openai")
+	}
+	if got := attrs["gateway.model"]; got != "unknown" {
+		t.Fatalf("gateway.model=%q, want %q", got, "unknown")
+	}
+	if got := attrs["gateway.route"]; got != "/openai/*" {
+		t.Fatalf("gateway.route=%q, want %q", got, "/openai/*")
+	}
+	if got := attrs["gateway.org_id"]; got != "org-route" {
+		t.Fatalf("gateway.org_id=%q, want %q", got, "org-route")
+	}
+	if got := attrs["gateway.workspace_id"]; got != "ws-route" {
+		t.Fatalf("gateway.workspace_id=%q, want %q", got, "ws-route")
+	}
+	if span.Status().Code == codes.Error {
+		t.Fatal("span status should not be error for 200")
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestWrapRouteSpanSetsErrorOn5xx(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	})
+	handler := runtime.WrapRouteSpan(inner)
+
+	req := httptest.NewRequest(http.MethodPost, "/anthropic/v1/messages", nil)
+	req = req.WithContext(auth.WithIdentity(req.Context(), &auth.Identity{
+		OrgID:       "org-5xx",
+		WorkspaceID: "ws-5xx",
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	span := spans[0]
+	attrs := spanAttrMap(span)
+	if got := attrs["gateway.route.provider"]; got != "anthropic" {
+		t.Fatalf("gateway.route.provider=%q, want %q", got, "anthropic")
+	}
+	if got := attrs["gateway.provider"]; got != "anthropic" {
+		t.Fatalf("gateway.provider=%q, want %q", got, "anthropic")
+	}
+	if got := attrs["gateway.model"]; got != "unknown" {
+		t.Fatalf("gateway.model=%q, want %q", got, "unknown")
+	}
+	if got := attrs["gateway.route"]; got != "/anthropic/*" {
+		t.Fatalf("gateway.route=%q, want %q", got, "/anthropic/*")
+	}
+	if got := attrs["gateway.org_id"]; got != "org-5xx" {
+		t.Fatalf("gateway.org_id=%q, want %q", got, "org-5xx")
+	}
+	if got := attrs["gateway.workspace_id"]; got != "ws-5xx" {
+		t.Fatalf("gateway.workspace_id=%q, want %q", got, "ws-5xx")
+	}
+	if span.Status().Code != codes.Error {
+		t.Fatalf("span status=%v, want %v", span.Status().Code, codes.Error)
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestStartTraceEnqueueSpanAccepted(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	ctx := auth.WithIdentity(context.Background(), &auth.Identity{
+		OrgID:       "org-enqueue",
+		WorkspaceID: "ws-enqueue",
+	})
+	_, endSpan := runtime.StartTraceEnqueueSpan(ctx, "openai", "gpt-4o-mini", "", "", "/openai/v1/chat/completions")
+	endSpan(true)
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	span := spans[0]
+	if span.Name() != "gateway.trace.enqueue" {
+		t.Fatalf("span name=%q, want %q", span.Name(), "gateway.trace.enqueue")
+	}
+	attrs := spanAttrMap(span)
+	if got := attrs["gateway.trace.enqueue.result"]; got != "accepted" {
+		t.Fatalf("gateway.trace.enqueue.result=%q, want %q", got, "accepted")
+	}
+	if got := attrs["gateway.provider"]; got != "openai" {
+		t.Fatalf("gateway.provider=%q, want %q", got, "openai")
+	}
+	if got := attrs["gateway.model"]; got != "gpt-4o-mini" {
+		t.Fatalf("gateway.model=%q, want %q", got, "gpt-4o-mini")
+	}
+	if got := attrs["gateway.route"]; got != "/openai/*" {
+		t.Fatalf("gateway.route=%q, want %q", got, "/openai/*")
+	}
+	if got := attrs["gateway.org_id"]; got != "org-enqueue" {
+		t.Fatalf("gateway.org_id=%q, want %q", got, "org-enqueue")
+	}
+	if got := attrs["gateway.workspace_id"]; got != "ws-enqueue" {
+		t.Fatalf("gateway.workspace_id=%q, want %q", got, "ws-enqueue")
+	}
+	if span.Status().Code == codes.Error {
+		t.Fatal("span status should not be error for accepted enqueue")
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestStartTraceEnqueueSpanDropped(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	ctx := auth.WithIdentity(context.Background(), &auth.Identity{
+		OrgID:       "org-dropped",
+		WorkspaceID: "ws-dropped",
+	})
+	_, endSpan := runtime.StartTraceEnqueueSpan(ctx, "anthropic", "claude-sonnet", "", "", "/anthropic/v1/messages")
+	endSpan(false)
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	span := spans[0]
+	attrs := spanAttrMap(span)
+	if got := attrs["gateway.trace.enqueue.result"]; got != "dropped" {
+		t.Fatalf("gateway.trace.enqueue.result=%q, want %q", got, "dropped")
+	}
+	if got := attrs["gateway.provider"]; got != "anthropic" {
+		t.Fatalf("gateway.provider=%q, want %q", got, "anthropic")
+	}
+	if got := attrs["gateway.model"]; got != "claude-sonnet" {
+		t.Fatalf("gateway.model=%q, want %q", got, "claude-sonnet")
+	}
+	if got := attrs["gateway.route"]; got != "/anthropic/*" {
+		t.Fatalf("gateway.route=%q, want %q", got, "/anthropic/*")
+	}
+	if got := attrs["gateway.org_id"]; got != "org-dropped" {
+		t.Fatalf("gateway.org_id=%q, want %q", got, "org-dropped")
+	}
+	if got := attrs["gateway.workspace_id"]; got != "ws-dropped" {
+		t.Fatalf("gateway.workspace_id=%q, want %q", got, "ws-dropped")
+	}
+	if span.Status().Code != codes.Error {
+		t.Fatalf("span status=%v, want %v", span.Status().Code, codes.Error)
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestMakeWriteSpanHookRecordsSpan(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	hook := runtime.MakeWriteSpanHook()
+	if hook == nil {
+		t.Fatal("MakeWriteSpanHook() returned nil")
+	}
+	endFn := hook(5)
+	endFn(nil)
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	span := spans[0]
+	if span.Name() != "gateway.trace.write" {
+		t.Fatalf("span name=%q, want %q", span.Name(), "gateway.trace.write")
+	}
+	attrs := spanAttrMap(span)
+	if got := attrs["gateway.trace.write.batch_size"]; got != "5" {
+		t.Fatalf("gateway.trace.write.batch_size=%q, want %q", got, "5")
+	}
+	if span.Status().Code == codes.Error {
+		t.Fatal("span status should not be error for successful write")
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestMakeWriteSpanHookRecordsErrorSpan(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	hook := runtime.MakeWriteSpanHook()
+	endFn := hook(3)
+	endFn(errors.New("connection refused"))
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	span := spans[0]
+	attrs := spanAttrMap(span)
+	if got := attrs["gateway.trace.write.batch_size"]; got != "3" {
+		t.Fatalf("gateway.trace.write.batch_size=%q, want %q", got, "3")
+	}
+	if got := attrs["gateway.trace.write.error_class"]; got != "connection refused" {
+		t.Fatalf("gateway.trace.write.error_class=%q, want %q", got, "connection refused")
+	}
+	if span.Status().Code != codes.Error {
+		t.Fatalf("span status=%v, want %v", span.Status().Code, codes.Error)
+	}
+}
+
+func TestRecordTraceWrittenIncrementsCounter(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	counter, err := meterProvider.Meter("test").Int64Counter("test.trace.written_total")
+	if err != nil {
+		t.Fatalf("Int64Counter() error: %v", err)
+	}
+
+	runtime := &Runtime{
+		enabled:             true,
+		traceWrittenCounter: counter,
+	}
+
+	runtime.RecordTraceWritten(3)
+	runtime.RecordTraceWritten(2)
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	found := false
+	for _, scope := range metrics.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "test.trace.written_total" {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric data type=%T, want metricdata.Sum[int64]", m.Data)
+			}
+			if len(sum.DataPoints) != 1 {
+				t.Fatalf("datapoints=%d, want 1", len(sum.DataPoints))
+			}
+			if sum.DataPoints[0].Value != 5 {
+				t.Fatalf("value=%d, want 5", sum.DataPoints[0].Value)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing test.trace.written_total metric")
+	}
+}
+
+func TestRecordProxyRequestIncludesMetricAttributes(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	meter := meterProvider.Meter("test")
+	counter, err := meter.Int64Counter("test.proxy.request_total")
+	if err != nil {
+		t.Fatalf("Int64Counter() error: %v", err)
+	}
+	histogram, err := meter.Float64Histogram("test.proxy.request_duration_seconds")
+	if err != nil {
+		t.Fatalf("Float64Histogram() error: %v", err)
+	}
+
+	runtime := &Runtime{
+		enabled:                       true,
+		proxyRequestCounter:           counter,
+		proxyRequestDurationHistogram: histogram,
+	}
+
+	runtime.RecordProxyRequest(context.Background(), "openai", "gpt-4o", "org-test", "ws-test", "/openai/v1/chat/completions", 200, 850)
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	var counterFound, histogramFound bool
+	for _, scope := range metrics.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			switch m.Name {
+			case "test.proxy.request_total":
+				sum, ok := m.Data.(metricdata.Sum[int64])
+				if !ok {
+					t.Fatalf("counter data type=%T, want metricdata.Sum[int64]", m.Data)
+				}
+				if len(sum.DataPoints) != 1 {
+					t.Fatalf("counter datapoints=%d, want 1", len(sum.DataPoints))
+				}
+				dp := sum.DataPoints[0]
+				if dp.Value != 1 {
+					t.Fatalf("counter value=%d, want 1", dp.Value)
+				}
+				gotAttrs := make(map[string]string)
+				for _, kv := range dp.Attributes.ToSlice() {
+					gotAttrs[string(kv.Key)] = kv.Value.Emit()
+				}
+				wantAttrs := map[string]string{
+					"provider":     "openai",
+					"model":        "gpt-4o",
+					"org_id":       "org-test",
+					"workspace_id": "ws-test",
+					"route":        "/openai/*",
+					"status_code":  "200",
+				}
+				for key, want := range wantAttrs {
+					if got := gotAttrs[key]; got != want {
+						t.Fatalf("counter attribute %q=%q, want %q", key, got, want)
+					}
+				}
+				for key, value := range gotAttrs {
+					if _, ok := wantAttrs[key]; !ok {
+						t.Fatalf("unexpected counter attribute %q=%q", key, value)
+					}
+				}
+				counterFound = true
+
+			case "test.proxy.request_duration_seconds":
+				hist, ok := m.Data.(metricdata.Histogram[float64])
+				if !ok {
+					t.Fatalf("histogram data type=%T, want metricdata.Histogram[float64]", m.Data)
+				}
+				if len(hist.DataPoints) != 1 {
+					t.Fatalf("histogram datapoints=%d, want 1", len(hist.DataPoints))
+				}
+				dp := hist.DataPoints[0]
+				if dp.Count != 1 {
+					t.Fatalf("histogram count=%d, want 1", dp.Count)
+				}
+				// 850ms = 0.85s
+				wantSum := 0.85
+				if dp.Sum < wantSum-0.001 || dp.Sum > wantSum+0.001 {
+					t.Fatalf("histogram sum=%f, want ~%f", dp.Sum, wantSum)
+				}
+				gotAttrs := make(map[string]string)
+				for _, kv := range dp.Attributes.ToSlice() {
+					gotAttrs[string(kv.Key)] = kv.Value.Emit()
+				}
+				wantAttrs := map[string]string{
+					"provider":     "openai",
+					"model":        "gpt-4o",
+					"org_id":       "org-test",
+					"workspace_id": "ws-test",
+					"route":        "/openai/*",
+				}
+				for key, want := range wantAttrs {
+					if got := gotAttrs[key]; got != want {
+						t.Fatalf("histogram attribute %q=%q, want %q", key, got, want)
+					}
+				}
+				for key, value := range gotAttrs {
+					if _, ok := wantAttrs[key]; !ok {
+						t.Fatalf("unexpected histogram attribute %q=%q", key, value)
+					}
+				}
+				histogramFound = true
+			}
+		}
+	}
+	if !counterFound {
+		t.Fatal("missing test.proxy.request_total metric")
+	}
+	if !histogramFound {
+		t.Fatal("missing test.proxy.request_duration_seconds metric")
+	}
+}
+
+// Cannot be parallel: mutates global OTel providers.
+func TestRegisterTraceQueueCapacityGaugeReportsValue(t *testing.T) {
+	oldMP := otel.GetMeterProvider()
+	defer otel.SetMeterProvider(oldMP)
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	otel.SetMeterProvider(meterProvider)
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	runtime := &Runtime{enabled: true}
+	runtime.RegisterTraceQueueCapacityGauge(func() int { return 1024 })
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	found := false
+	for _, scope := range metrics.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "ongoingai.trace.queue_capacity" {
+				continue
+			}
+			gauge, ok := m.Data.(metricdata.Gauge[int64])
+			if !ok {
+				t.Fatalf("metric data type=%T, want metricdata.Gauge[int64]", m.Data)
+			}
+			if len(gauge.DataPoints) != 1 {
+				t.Fatalf("datapoints=%d, want 1", len(gauge.DataPoints))
+			}
+			if gauge.DataPoints[0].Value != 1024 {
+				t.Fatalf("value=%d, want 1024", gauge.DataPoints[0].Value)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing ongoingai.trace.queue_capacity metric")
+	}
+}
+
+func TestSpanWrappersNoopWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	runtimes := []struct {
+		name    string
+		runtime *Runtime
+	}{
+		{name: "nil runtime", runtime: nil},
+		{name: "disabled runtime", runtime: &Runtime{enabled: false}},
+	}
+
+	for _, tt := range runtimes {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusOK)
+			})
+
+			// WrapAuthMiddleware passes through.
+			authWrapped := tt.runtime.WrapAuthMiddleware(handler)
+			rec := httptest.NewRecorder()
+			authWrapped.ServeHTTP(rec, httptest.NewRequest("POST", "/openai/v1/chat", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("WrapAuthMiddleware pass-through status=%d, want 200", rec.Code)
+			}
+
+			// WrapRouteSpan passes through.
+			routeWrapped := tt.runtime.WrapRouteSpan(handler)
+			rec = httptest.NewRecorder()
+			routeWrapped.ServeHTTP(rec, httptest.NewRequest("POST", "/openai/v1/chat", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("WrapRouteSpan pass-through status=%d, want 200", rec.Code)
+			}
+
+			// StartTraceEnqueueSpan returns noop end function.
+			ctx, endSpan := tt.runtime.StartTraceEnqueueSpan(context.Background(), "openai", "gpt-4o", "org-1", "ws-1", "/openai/v1/chat")
+			endSpan(true)
+			endSpan(false)
+			if ctx == nil {
+				t.Fatal("StartTraceEnqueueSpan returned nil context")
+			}
+
+			// MakeWriteSpanHook returns nil.
+			hook := tt.runtime.MakeWriteSpanHook()
+			if hook != nil {
+				t.Fatal("MakeWriteSpanHook() should return nil when disabled")
+			}
+
+			// New methods no-op without panic.
+			tt.runtime.RecordTraceWritten(5)
+			tt.runtime.RecordProxyRequest(context.Background(), "openai", "gpt-4o", "org-1", "ws-1", "/openai/v1/chat", 200, 500)
+			tt.runtime.RegisterTraceQueueCapacityGauge(func() int { return 128 })
+
+			if tt.runtime.PrometheusHandler() != nil {
+				t.Fatal("PrometheusHandler() should be nil when disabled")
+			}
+		})
+	}
+}
+
+// Cannot be parallel: mutates global OTel providers.
+func TestSetupPrometheusCreatesHandler(t *testing.T) {
+	oldMP := otel.GetMeterProvider()
+	defer otel.SetMeterProvider(oldMP)
+
+	runtime, err := Setup(context.Background(), config.OTelConfig{
+		Enabled:                true,
+		Endpoint:               "localhost:4318",
+		ServiceName:            "test-prometheus",
+		TracesEnabled:          false,
+		MetricsEnabled:         false,
+		PrometheusEnabled:      true,
+		PrometheusPath:         "/metrics",
+		SamplingRatio:          1.0,
+		ExportTimeoutMS:        1000,
+		MetricExportIntervalMS: 10000,
+	}, "test", nil)
+	if err != nil {
+		t.Fatalf("Setup() error: %v", err)
+	}
+	defer func() { _ = runtime.Shutdown(context.Background()) }()
+
+	handler := runtime.PrometheusHandler()
+	if handler == nil {
+		t.Fatal("PrometheusHandler() returned nil, want non-nil handler")
+	}
+
+	// Scrape the handler and verify it returns metric content.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prometheus scrape status=%d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+	if body == "" {
+		t.Fatal("prometheus scrape returned empty body")
+	}
+}
+
+// Cannot be parallel: mutates global OTel providers.
+func TestSetupPrometheusAndOTLPCoexist(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	oldMP := otel.GetMeterProvider()
+	oldProp := otel.GetTextMapPropagator()
+	defer func() {
+		otel.SetTracerProvider(oldTP)
+		otel.SetMeterProvider(oldMP)
+		otel.SetTextMapPropagator(oldProp)
+	}()
+
+	var metricRequests atomic.Int64
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+		if r.URL.Path == "/v1/metrics" {
+			metricRequests.Add(1)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+
+	runtime, err := Setup(context.Background(), config.OTelConfig{
+		Enabled:                true,
+		Endpoint:               collector.URL,
+		ServiceName:            "test-dual",
+		TracesEnabled:          false,
+		MetricsEnabled:         true,
+		PrometheusEnabled:      true,
+		PrometheusPath:         "/metrics",
+		SamplingRatio:          1.0,
+		ExportTimeoutMS:        1000,
+		MetricExportIntervalMS: 25,
+	}, "test", nil)
+	if err != nil {
+		t.Fatalf("Setup() error: %v", err)
+	}
+
+	// Record a metric so the OTLP reader has something to export.
+	runtime.RecordTraceEnqueued()
+
+	// Verify Prometheus handler is available and works.
+	handler := runtime.PrometheusHandler()
+	if handler == nil {
+		t.Fatal("PrometheusHandler() returned nil, want non-nil when both enabled")
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("prometheus scrape status=%d, want 200", rec.Code)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := runtime.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error: %v", err)
+	}
+
+	// Verify OTLP push also received metrics.
+	waitFor(t, 2*time.Second, func() bool {
+		return metricRequests.Load() > 0
+	})
+}
+
+func TestSetupDisabledReturnsNilPrometheusHandler(t *testing.T) {
+	t.Parallel()
+
+	runtime, err := Setup(context.Background(), config.OTelConfig{Enabled: false}, "test", nil)
+	if err != nil {
+		t.Fatalf("Setup() error: %v", err)
+	}
+	if runtime.PrometheusHandler() != nil {
+		t.Fatal("PrometheusHandler() should be nil when disabled")
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestMakeWriteSpanHookScrubsCredentialInError(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	hook := runtime.MakeWriteSpanHook()
+	if hook == nil {
+		t.Fatal("MakeWriteSpanHook() returned nil")
+	}
+
+	// Simulate an error that leaks a credential (e.g. connection string with password).
+	endFn := hook(2)
+	endFn(errors.New("connect to host=db.example.com password=supersecret123 failed"))
+
+	spans := recorder.Ended()
+	if len(spans) != 1 {
+		t.Fatalf("ended spans=%d, want 1", len(spans))
+	}
+	attrs := spanAttrMap(spans[0])
+	errorClass := attrs["gateway.trace.write.error_class"]
+	if ContainsCredential(errorClass) {
+		t.Fatalf("credential leaked into span attribute: %q", errorClass)
+	}
+	if !strings.Contains(errorClass, "[CREDENTIAL_REDACTED]") {
+		t.Fatalf("error_class=%q, want redaction marker", errorClass)
+	}
+}
+
+// Cannot be parallel: mutates global OTel tracer provider.
+func TestOtelHTTPDoesNotCaptureAuthHeaders(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(oldTP)
+
+	recorder := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	runtime := &Runtime{enabled: true, tracer: tp.Tracer(instrumentationName)}
+	handler := runtime.WrapHTTPHandler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/openai/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer sk_live_secret_key_value")
+	req.Header.Set("X-API-Key", "sk_test_another_secret_key")
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	spans := recorder.Ended()
+	if len(spans) == 0 {
+		t.Fatal("no spans recorded")
+	}
+
+	for _, span := range spans {
+		for _, a := range span.Attributes() {
+			val := a.Value.Emit()
+			if ContainsCredential(val) {
+				t.Fatalf("credential found in span attribute %q=%q", a.Key, val)
+			}
+		}
+		for _, event := range span.Events() {
+			for _, a := range event.Attributes {
+				val := a.Value.Emit()
+				if ContainsCredential(val) {
+					t.Fatalf("credential found in event attribute %q=%q", a.Key, val)
+				}
+			}
+		}
+	}
+}
+
+// Cannot be parallel: mutates global OTel providers.
+func TestSetupRegistersRuntimeMetrics(t *testing.T) {
+	oldTP := otel.GetTracerProvider()
+	oldMP := otel.GetMeterProvider()
+	oldProp := otel.GetTextMapPropagator()
+	defer func() {
+		otel.SetTracerProvider(oldTP)
+		otel.SetMeterProvider(oldMP)
+		otel.SetTextMapPropagator(oldProp)
+	}()
+
+	runtime, err := Setup(context.Background(), config.OTelConfig{
+		Enabled:                true,
+		Endpoint:               "localhost:4318",
+		ServiceName:            "test-runtime-metrics",
+		TracesEnabled:          false,
+		MetricsEnabled:         false,
+		PrometheusEnabled:      true,
+		SamplingRatio:          1.0,
+		ExportTimeoutMS:        1000,
+		MetricExportIntervalMS: 10000,
+	}, "test", nil)
+	if err != nil {
+		t.Fatalf("Setup() error: %v", err)
+	}
+	defer func() { _ = runtime.Shutdown(context.Background()) }()
+
+	handler := runtime.PrometheusHandler()
+	if handler == nil {
+		t.Fatal("PrometheusHandler() returned nil")
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+
+	// Look for at least one Go runtime metric in Prometheus output.
+	// The contrib/instrumentation/runtime package emits metrics like
+	// go_memory_classes_heap_objects_bytes, go_goroutine_count, etc.
+	found := false
+	for _, substr := range []string{"go_memory", "go_goroutine", "go_gc", "go_sched"} {
+		if strings.Contains(body, substr) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Logf("prometheus body (first 2000 chars): %s", body[:min(len(body), 2000)])
+		t.Fatal("expected at least one Go runtime metric in Prometheus output")
+	}
+}
+
+// Cannot be parallel: mutates global OTel providers.
+func TestSetupDisabledSkipsRuntimeMetrics(t *testing.T) {
+	runtime, err := Setup(context.Background(), config.OTelConfig{Enabled: false}, "test", nil)
+	if err != nil {
+		t.Fatalf("Setup() error: %v", err)
+	}
+	if runtime.Enabled() {
+		t.Fatal("expected Enabled()=false for disabled config")
+	}
+	// No metrics should be registered — runtime itself should be noop.
+}
+
+func TestCustomHistogramBucketsProxy(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(reader),
+		sdkmetric.WithView(sdkmetric.NewView(
+			sdkmetric.Instrument{Name: "ongoingai.proxy.request_duration_seconds"},
+			sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: proxyLatencyBuckets}},
+		)),
+	)
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	histogram, err := meterProvider.Meter("test").Float64Histogram("ongoingai.proxy.request_duration_seconds")
+	if err != nil {
+		t.Fatalf("Float64Histogram() error: %v", err)
+	}
+	histogram.Record(context.Background(), 0.042)
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	for _, scope := range metrics.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "ongoingai.proxy.request_duration_seconds" {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				t.Fatalf("data type=%T, want Histogram[float64]", m.Data)
+			}
+			if len(hist.DataPoints) != 1 {
+				t.Fatalf("datapoints=%d, want 1", len(hist.DataPoints))
+			}
+			bounds := hist.DataPoints[0].Bounds
+			if len(bounds) != len(proxyLatencyBuckets) {
+				t.Fatalf("bounds=%d, want %d", len(bounds), len(proxyLatencyBuckets))
+			}
+			for i, b := range bounds {
+				if b != proxyLatencyBuckets[i] {
+					t.Fatalf("bounds[%d]=%f, want %f", i, b, proxyLatencyBuckets[i])
+				}
+			}
+			return
+		}
+	}
+	t.Fatal("missing ongoingai.proxy.request_duration_seconds metric")
+}
+
+func TestCustomHistogramBucketsFlush(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(reader),
+		sdkmetric.WithView(sdkmetric.NewView(
+			sdkmetric.Instrument{Name: "ongoingai.trace.flush_duration_seconds"},
+			sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: traceFlushLatencyBuckets}},
+		)),
+	)
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	histogram, err := meterProvider.Meter("test").Float64Histogram("ongoingai.trace.flush_duration_seconds")
+	if err != nil {
+		t.Fatalf("Float64Histogram() error: %v", err)
+	}
+	histogram.Record(context.Background(), 0.008)
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	for _, scope := range metrics.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "ongoingai.trace.flush_duration_seconds" {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				t.Fatalf("data type=%T, want Histogram[float64]", m.Data)
+			}
+			if len(hist.DataPoints) != 1 {
+				t.Fatalf("datapoints=%d, want 1", len(hist.DataPoints))
+			}
+			bounds := hist.DataPoints[0].Bounds
+			if len(bounds) != len(traceFlushLatencyBuckets) {
+				t.Fatalf("bounds=%d, want %d", len(bounds), len(traceFlushLatencyBuckets))
+			}
+			for i, b := range bounds {
+				if b != traceFlushLatencyBuckets[i] {
+					t.Fatalf("bounds[%d]=%f, want %f", i, b, traceFlushLatencyBuckets[i])
+				}
+			}
+			return
+		}
+	}
+	t.Fatal("missing ongoingai.trace.flush_duration_seconds metric")
+}
+
+func TestHistogramExemplarsAttachTraceID(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(reader),
+		sdkmetric.WithExemplarFilter(exemplar.AlwaysOnFilter),
+	)
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	meter := meterProvider.Meter("test")
+	histogram, err := meter.Float64Histogram("test.proxy.request_duration_seconds")
+	if err != nil {
+		t.Fatalf("Float64Histogram() error: %v", err)
+	}
+
+	runtime := &Runtime{
+		enabled:                       true,
+		proxyRequestDurationHistogram: histogram,
+	}
+
+	// Create a real span so the context carries a valid trace ID.
+	tp := sdktrace.NewTracerProvider()
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+	ctx, span := tp.Tracer("test").Start(context.Background(), "test.request")
+	wantTraceID := span.SpanContext().TraceID()
+	if !wantTraceID.IsValid() {
+		t.Fatal("test span has invalid trace ID")
+	}
+	wantTraceIDBytes := wantTraceID[:]
+
+	runtime.RecordProxyRequest(ctx, "openai", "gpt-4o", "org-ex", "ws-ex", "/openai/v1/chat/completions", 200, 750)
+	span.End()
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	found := false
+	for _, scope := range metrics.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "test.proxy.request_duration_seconds" {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				t.Fatalf("data type=%T, want metricdata.Histogram[float64]", m.Data)
+			}
+			if len(hist.DataPoints) != 1 {
+				t.Fatalf("datapoints=%d, want 1", len(hist.DataPoints))
+			}
+			dp := hist.DataPoints[0]
+			if len(dp.Exemplars) == 0 {
+				t.Fatal("histogram data point has no exemplars; expected at least one with trace ID")
+			}
+			exemplarFound := false
+			for _, ex := range dp.Exemplars {
+				if len(ex.TraceID) > 0 && !bytes.Equal(ex.TraceID, make([]byte, len(ex.TraceID))) {
+					if !bytes.Equal(ex.TraceID, wantTraceIDBytes) {
+						t.Fatalf("exemplar trace_id=%x, want %x", ex.TraceID, wantTraceIDBytes)
+					}
+					exemplarFound = true
+				}
+			}
+			if !exemplarFound {
+				t.Fatal("no exemplar with non-zero trace ID found")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing test.proxy.request_duration_seconds metric")
+	}
+}
+
+func spanAttrMap(span sdktrace.ReadOnlySpan) map[string]string {
+	attrs := make(map[string]string)
+	for _, a := range span.Attributes() {
+		attrs[string(a.Key)] = a.Value.Emit()
+	}
+	return attrs
 }

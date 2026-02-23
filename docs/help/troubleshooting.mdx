@@ -142,13 +142,14 @@ Run the following checks in order before you debug individual endpoints.
 - Fix: Use supported ranges and time formats. Ensure `to >= from` and
   `max_tokens >= min_tokens`.
 
-### `/api/analytics/*` returns `400` for series options
+### `/api/analytics/*` returns `400` for query options
 
-- Symptom: Usage or cost analytics request fails with query validation
-  errors.
+- Symptom: Usage, cost, latency, or error analytics request fails with query
+  validation errors.
 - Cause: Unsupported `group_by` or `bucket`, or invalid date range.
-- Fix: Use `group_by=provider|model` and `bucket=hour|day|week`.
-  Ensure `to >= from`.
+- Fix: For usage/cost, use `group_by=provider|model` and `bucket=hour|day|week`.
+  For latency/errors, use `group_by=provider|model|route|key`. Ensure
+  `to >= from`.
 
 ### `/api/traces/:id` returns `404 trace not found` for known ID
 
@@ -209,6 +210,44 @@ Run the following checks in order before you debug individual endpoints.
 - Symptom: Shutdown logs report flush timeout or cancellation.
 - Cause: Pending trace writes exceeded shutdown flush window.
 - Fix: Allow graceful shutdown time and verify storage responsiveness.
+
+## Observability and telemetry
+
+### Prometheus `/metrics` returns 404
+
+- Symptom: `curl http://localhost:8080/metrics` returns `404`.
+- Cause: `prometheus_enabled` is not set to `true`.
+- Fix: Set `observability.otel.prometheus_enabled: true` in YAML or
+  `ONGOINGAI_PROMETHEUS_ENABLED=true` as an env var. Verify that
+  `prometheus_path` matches the path you are requesting.
+
+### OTel spans not appearing in collector
+
+- Symptom: Tracing UI shows no data for `ongoingai-gateway`.
+- Cause: OTEL is not enabled, traces are disabled, or the collector endpoint
+  is unreachable.
+- Fix: Verify `observability.otel.enabled: true` and
+  `observability.otel.traces_enabled: true`. Check that the `endpoint` value
+  is reachable and review gateway logs for export timeout errors.
+
+### Metrics missing from collector
+
+- Symptom: Traces appear in the collector but metrics do not.
+- Cause: `metrics_enabled` is `false`, or the collector does not accept OTLP
+  metrics.
+- Fix: Set `metrics_enabled: true` and verify collector OTLP metric
+  ingestion. Alternatively, enable `prometheus_enabled: true` to scrape
+  metrics directly.
+
+### High `queue_dropped_total` or `write_failed_total`
+
+- Symptom: `ongoingai.trace.queue_dropped_total` or
+  `ongoingai.trace.write_failed_total` counters are increasing.
+- Cause: Storage throughput cannot keep up with trace capture volume, or
+  storage connectivity is degraded.
+- Fix: Verify storage health and connectivity. For SQLite, check disk I/O.
+  For Postgres, check connection pool and query latency. Reduce capture
+  load if necessary.
 
 ## Next steps
 

@@ -122,6 +122,8 @@ Common auth-related responses when `auth.enabled=true`:
   - `last_enqueue_drop_at` (optional)
   - `last_write_drop_at` (optional)
   - `last_write_drop_operation` (optional)
+  - `write_failures_by_class` (optional; includes only non-zero classes)
+  - `store_driver` (optional)
 
 Example:
 
@@ -241,6 +243,8 @@ Placeholders:
 | `GET` | `/api/analytics/cost` | `analytics:read` when auth is enabled | `200` cost summary or series |
 | `GET` | `/api/analytics/models` | `analytics:read` when auth is enabled | `200` model stats |
 | `GET` | `/api/analytics/keys` | `analytics:read` when auth is enabled | `200` API key stats |
+| `GET` | `/api/analytics/latency` | `analytics:read` when auth is enabled | `200` latency distribution stats |
+| `GET` | `/api/analytics/errors` | `analytics:read` when auth is enabled | `200` error-rate breakdown stats |
 | `GET` | `/api/analytics/summary` | `analytics:read` when auth is enabled | `200` merged analytics summary |
 
 Shared analytics query parameters:
@@ -264,6 +268,12 @@ Series behavior:
 - If either is set, endpoint returns series shape.
 - If series mode is enabled and `bucket` is empty, bucket defaults to `day`.
 
+Group options for `/api/analytics/latency` and `/api/analytics/errors`:
+
+| Parameter | Type | Constraints | Notes |
+| --- | --- | --- | --- |
+| `group_by` | string | `provider`, `model`, `route`, `key`, or empty | Returns grouped breakdown rows. |
+
 `GET /api/analytics/summary` response fields:
 - `total_requests`
 - `total_input_tokens`
@@ -280,6 +290,12 @@ curl "http://localhost:8080/api/analytics/summary?from=2026-02-01&to=2026-02-14"
   -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
 
 curl "http://localhost:8080/api/analytics/usage?group_by=provider&bucket=day" \
+  -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
+
+curl "http://localhost:8080/api/analytics/latency?group_by=route" \
+  -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
+
+curl "http://localhost:8080/api/analytics/errors?group_by=key" \
   -H "X-OngoingAI-Gateway-Key: GATEWAY_KEY"
 ```
 

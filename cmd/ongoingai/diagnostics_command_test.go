@@ -35,6 +35,10 @@ func TestRunDiagnosticsJSONOutput(t *testing.T) {
 			LastEnqueueDropAt:                &lastQueueDrop,
 			LastWriteDropAt:                  &lastWriteDrop,
 			LastWriteDropOperation:           "write_batch_fallback",
+			WriteFailuresByClass: map[string]int64{
+				"contention": 1,
+			},
+			StoreDriver: "sqlite",
 		},
 	}
 
@@ -71,6 +75,15 @@ func TestRunDiagnosticsJSONOutput(t *testing.T) {
 	if payload.Diagnostics.LastWriteDropOperation != "write_batch_fallback" {
 		t.Fatalf("last_write_drop_operation=%q, want write_batch_fallback", payload.Diagnostics.LastWriteDropOperation)
 	}
+	if payload.Diagnostics.WriteFailuresByClass == nil {
+		t.Fatal("write_failures_by_class should be populated")
+	}
+	if payload.Diagnostics.WriteFailuresByClass["contention"] != 1 {
+		t.Fatalf("contention=%d, want 1", payload.Diagnostics.WriteFailuresByClass["contention"])
+	}
+	if payload.Diagnostics.StoreDriver != "sqlite" {
+		t.Fatalf("store_driver=%q, want sqlite", payload.Diagnostics.StoreDriver)
+	}
 }
 
 func TestRunDiagnosticsTextOutput(t *testing.T) {
@@ -91,6 +104,11 @@ func TestRunDiagnosticsTextOutput(t *testing.T) {
 			EnqueueDroppedTotal:              7,
 			WriteDroppedTotal:                5,
 			TotalDroppedTotal:                12,
+			WriteFailuresByClass: map[string]int64{
+				"connection": 3,
+				"timeout":    2,
+			},
+			StoreDriver: "sqlite",
 		},
 	}
 
@@ -120,6 +138,18 @@ func TestRunDiagnosticsTextOutput(t *testing.T) {
 	}
 	if !strings.Contains(body, "Total dropped") || !strings.Contains(body, "12") {
 		t.Fatalf("stdout=%q, want dropped trace totals", body)
+	}
+	if !strings.Contains(body, "Write Failures by Class") {
+		t.Fatalf("stdout=%q, want Write Failures by Class section", body)
+	}
+	if !strings.Contains(body, "connection") || !strings.Contains(body, "3") {
+		t.Fatalf("stdout=%q, want connection failure count", body)
+	}
+	if !strings.Contains(body, "timeout") || !strings.Contains(body, "2") {
+		t.Fatalf("stdout=%q, want timeout failure count", body)
+	}
+	if !strings.Contains(body, "Store") || !strings.Contains(body, "sqlite") {
+		t.Fatalf("stdout=%q, want Store driver section", body)
 	}
 }
 
@@ -177,6 +207,48 @@ func TestRunDiagnosticsRejectsInvalidFormat(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "expected text or json") {
 		t.Fatalf("stderr=%q, want invalid format message", stderr.String())
+	}
+}
+
+func TestFetchTracePipelineDiagnosticsRejectsOversizedResponse(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Send a response larger than the maximum allowed size (1 MB).
+		data := make([]byte, 2*1024*1024)
+		for i := range data {
+			data[i] = 'x'
+		}
+		_, _ = w.Write(data)
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := fetchTracePipelineDiagnostics(server.URL, "X-Key", "", 5*time.Second)
+	if err == nil {
+		t.Fatal("expected error for oversized response, got nil")
+	}
+	if !strings.Contains(err.Error(), "response too large") {
+		t.Fatalf("err=%q, want response too large error", err)
+	}
+}
+
+func TestFetchTracePipelineDiagnosticsRespectsTimeout(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(tracePipelineDiagnosticsDocument{
+			SchemaVersion: "trace-pipeline-diagnostics.v1",
+			GeneratedAt:   time.Now(),
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := fetchTracePipelineDiagnostics(server.URL, "X-Key", "", 50*time.Millisecond)
+	if err == nil {
+		t.Fatal("expected timeout error, got nil")
 	}
 }
 

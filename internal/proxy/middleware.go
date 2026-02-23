@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"net"
@@ -31,7 +32,7 @@ func LoggingMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
 		start := time.Now()
 		recorder := newStatusResponseWriter(w)
 		next.ServeHTTP(recorder, r)
-		logger.Info(
+		logger.InfoContext(r.Context(),
 			"request complete",
 			"correlation_id", correlationID,
 			"method", r.Method,
@@ -49,6 +50,9 @@ type BodyCaptureOptions struct {
 }
 
 type CapturedExchange struct {
+	// Context carries the request context so downstream consumers (e.g. trace
+	// enqueue) can create child spans of the HTTP request span.
+	Context               context.Context
 	Method                string
 	Path                  string
 	StatusCode            int
@@ -139,6 +143,7 @@ func BodyCaptureMiddleware(options BodyCaptureOptions, sink BodyCaptureSink, nex
 		}
 
 		sink(&CapturedExchange{
+			Context:               r.Context(),
 			Method:                r.Method,
 			Path:                  r.URL.Path,
 			StatusCode:            statusCode,

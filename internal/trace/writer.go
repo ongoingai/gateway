@@ -24,20 +24,22 @@ type TracePipelineDiagnosticsReader interface {
 
 // TracePipelineDiagnostics captures trace pipeline queue pressure and drop signals.
 type TracePipelineDiagnostics struct {
-	QueueCapacity                    int        `json:"queue_capacity"`
-	QueueDepth                       int        `json:"queue_depth"`
-	QueueDepthHighWatermark          int        `json:"queue_depth_high_watermark"`
-	QueueUtilizationPct              int        `json:"queue_utilization_pct"`
-	QueueHighWatermarkUtilizationPct int        `json:"queue_high_watermark_utilization_pct"`
-	QueuePressureState               string     `json:"queue_pressure_state"`
-	QueueHighWatermarkPressureState  string     `json:"queue_high_watermark_pressure_state"`
-	EnqueueAcceptedTotal             int64      `json:"enqueue_accepted_total"`
-	EnqueueDroppedTotal              int64      `json:"enqueue_dropped_total"`
-	WriteDroppedTotal                int64      `json:"write_dropped_total"`
-	TotalDroppedTotal                int64      `json:"total_dropped_total"`
-	LastEnqueueDropAt                *time.Time `json:"last_enqueue_drop_at,omitempty"`
-	LastWriteDropAt                  *time.Time `json:"last_write_drop_at,omitempty"`
-	LastWriteDropOperation           string     `json:"last_write_drop_operation,omitempty"`
+	QueueCapacity                    int              `json:"queue_capacity"`
+	QueueDepth                       int              `json:"queue_depth"`
+	QueueDepthHighWatermark          int              `json:"queue_depth_high_watermark"`
+	QueueUtilizationPct              int              `json:"queue_utilization_pct"`
+	QueueHighWatermarkUtilizationPct int              `json:"queue_high_watermark_utilization_pct"`
+	QueuePressureState               string           `json:"queue_pressure_state"`
+	QueueHighWatermarkPressureState  string           `json:"queue_high_watermark_pressure_state"`
+	EnqueueAcceptedTotal             int64            `json:"enqueue_accepted_total"`
+	EnqueueDroppedTotal              int64            `json:"enqueue_dropped_total"`
+	WriteDroppedTotal                int64            `json:"write_dropped_total"`
+	TotalDroppedTotal                int64            `json:"total_dropped_total"`
+	LastEnqueueDropAt                *time.Time       `json:"last_enqueue_drop_at,omitempty"`
+	LastWriteDropAt                  *time.Time       `json:"last_write_drop_at,omitempty"`
+	LastWriteDropOperation           string           `json:"last_write_drop_operation,omitempty"`
+	WriteFailuresByClass             map[string]int64 `json:"write_failures_by_class,omitempty"`
+	StoreDriver                      string           `json:"store_driver,omitempty"`
 }
 
 // WriteFailure describes trace records that could not be persisted.
@@ -46,12 +48,29 @@ type WriteFailure struct {
 	BatchSize   int
 	FailedCount int
 	Err         error
+	ErrorClass  string
 }
 
 // WriteFailureHandler receives asynchronous trace write failure signals.
 type WriteFailureHandler func(WriteFailure)
 
 var noopWriteFailureHandler = WriteFailureHandler(func(WriteFailure) {})
+
+// WriterMetrics holds optional callbacks the Writer invokes at key pipeline points.
+type WriterMetrics struct {
+	// OnEnqueue is called each time a trace is successfully placed on the queue.
+	OnEnqueue func()
+	// OnDrop is called each time a trace is dropped because the queue is full.
+	OnDrop func()
+	// OnFlush is called after each batch is flushed to storage.
+	OnFlush func(batchSize int, duration time.Duration)
+	// OnWriteStart is called before each storage write. It returns an end
+	// function that the writer calls after the write completes (with error or nil).
+	OnWriteStart func(batchSize int) func(error)
+	// OnWriteSuccess is called after traces are successfully persisted to storage.
+	// The count parameter indicates how many traces were written.
+	OnWriteSuccess func(count int)
+}
 
 type Writer struct {
 	store TraceStore
@@ -67,6 +86,7 @@ type Writer struct {
 	lifecycleMu        sync.RWMutex
 	workerCancel       context.CancelFunc
 	writeFailureHandle atomic.Value // WriteFailureHandler
+	metrics            atomic.Value // *WriterMetrics
 
 	queueDepthHighWatermark atomic.Int64
 	enqueueAcceptedTotal    atomic.Int64
@@ -75,6 +95,12 @@ type Writer struct {
 	lastEnqueueDropUnixNano atomic.Int64
 	lastWriteDropUnixNano   atomic.Int64
 	lastWriteDropOperation  atomic.Value // string
+
+	writeFailureConnection atomic.Int64
+	writeFailureTimeout    atomic.Int64
+	writeFailureContention atomic.Int64
+	writeFailureConstraint atomic.Int64
+	writeFailureUnknown    atomic.Int64
 }
 
 func NewWriter(store TraceStore, bufferSize int) *Writer {
@@ -88,6 +114,7 @@ func NewWriter(store TraceStore, bufferSize int) *Writer {
 		done:  make(chan struct{}),
 	}
 	writer.writeFailureHandle.Store(noopWriteFailureHandler)
+	writer.metrics.Store(&WriterMetrics{})
 	writer.lastWriteDropOperation.Store("")
 	return writer
 }
@@ -101,6 +128,38 @@ func (w *Writer) SetWriteFailureHandler(handler WriteFailureHandler) {
 		handler = noopWriteFailureHandler
 	}
 	w.writeFailureHandle.Store(handler)
+}
+
+// SetMetrics replaces the metric callbacks used by the writer pipeline.
+func (w *Writer) SetMetrics(m *WriterMetrics) {
+	if w == nil {
+		return
+	}
+	if m == nil {
+		m = &WriterMetrics{}
+	}
+	w.metrics.Store(m)
+}
+
+func (w *Writer) loadMetrics() *WriterMetrics {
+	m, _ := w.metrics.Load().(*WriterMetrics)
+	return m
+}
+
+// QueueLen returns the current number of items waiting in the write queue.
+func (w *Writer) QueueLen() int {
+	if w == nil {
+		return 0
+	}
+	return len(w.queue)
+}
+
+// QueueCap returns the capacity of the write queue.
+func (w *Writer) QueueCap() int {
+	if w == nil {
+		return 0
+	}
+	return cap(w.queue)
 }
 
 func (w *Writer) Start(ctx context.Context) {
@@ -138,11 +197,13 @@ func (w *Writer) Start(ctx context.Context) {
 				for len(batch) < writerBatchSize {
 					select {
 					case <-workerCtx.Done():
-						w.flushBatch(workerCtx, batch)
+						// Use a fresh context so the drain flush is not
+						// rejected by the store due to context cancellation.
+						w.flushBatch(context.Background(), batch)
 						return
 					case next, ok := <-w.queue:
 						if !ok {
-							w.flushBatch(workerCtx, batch)
+							w.flushBatch(context.Background(), batch)
 							return
 						}
 						if next != nil {
@@ -172,11 +233,17 @@ func (w *Writer) Enqueue(t *Trace) bool {
 	case w.queue <- t:
 		w.enqueueAcceptedTotal.Add(1)
 		w.observeQueueDepth(len(w.queue))
+		if m := w.loadMetrics(); m != nil && m.OnEnqueue != nil {
+			m.OnEnqueue()
+		}
 		return true
 	default:
 		w.enqueueDroppedTotal.Add(1)
 		w.observeQueueDepth(cap(w.queue))
 		w.lastEnqueueDropUnixNano.Store(time.Now().UTC().UnixNano())
+		if m := w.loadMetrics(); m != nil && m.OnDrop != nil {
+			m.OnDrop()
+		}
 		return false
 	}
 }
@@ -233,10 +300,24 @@ func (w *Writer) reportWriteFailure(failure WriteFailure) {
 	if w == nil || failure.FailedCount <= 0 {
 		return
 	}
+	failure.ErrorClass = ClassifyWriteError(failure.Err)
 	w.writeDroppedTotal.Add(int64(failure.FailedCount))
 	w.lastWriteDropUnixNano.Store(time.Now().UTC().UnixNano())
 	if failure.Operation != "" {
 		w.lastWriteDropOperation.Store(failure.Operation)
+	}
+	count := int64(failure.FailedCount)
+	switch failure.ErrorClass {
+	case WriteErrorClassConnection:
+		w.writeFailureConnection.Add(count)
+	case WriteErrorClassTimeout:
+		w.writeFailureTimeout.Add(count)
+	case WriteErrorClassContention:
+		w.writeFailureContention.Add(count)
+	case WriteErrorClassConstraint:
+		w.writeFailureConstraint.Add(count)
+	default:
+		w.writeFailureUnknown.Add(count)
 	}
 	handler, ok := w.writeFailureHandle.Load().(WriteFailureHandler)
 	if !ok || handler == nil {
@@ -290,6 +371,27 @@ func (w *Writer) TracePipelineDiagnostics() TracePipelineDiagnostics {
 	if operation, ok := w.lastWriteDropOperation.Load().(string); ok {
 		snapshot.LastWriteDropOperation = operation
 	}
+
+	byClass := make(map[string]int64)
+	if v := w.writeFailureConnection.Load(); v > 0 {
+		byClass[WriteErrorClassConnection] = v
+	}
+	if v := w.writeFailureTimeout.Load(); v > 0 {
+		byClass[WriteErrorClassTimeout] = v
+	}
+	if v := w.writeFailureContention.Load(); v > 0 {
+		byClass[WriteErrorClassContention] = v
+	}
+	if v := w.writeFailureConstraint.Load(); v > 0 {
+		byClass[WriteErrorClassConstraint] = v
+	}
+	if v := w.writeFailureUnknown.Load(); v > 0 {
+		byClass[WriteErrorClassUnknown] = v
+	}
+	if len(byClass) > 0 {
+		snapshot.WriteFailuresByClass = byClass
+	}
+
 	return snapshot
 }
 
@@ -336,6 +438,23 @@ func (w *Writer) flushBatch(ctx context.Context, batch []*Trace) {
 	if len(batch) == 0 {
 		return
 	}
+	start := time.Now()
+	if m := w.loadMetrics(); m != nil && m.OnWriteStart != nil {
+		droppedBefore := w.writeDroppedTotal.Load()
+		endSpan := m.OnWriteStart(len(batch))
+		defer func() {
+			var writeErr error
+			if w.writeDroppedTotal.Load() > droppedBefore {
+				writeErr = errors.New("batch had write failures")
+			}
+			endSpan(writeErr)
+		}()
+	}
+	defer func() {
+		if m := w.loadMetrics(); m != nil && m.OnFlush != nil {
+			m.OnFlush(len(batch), time.Since(start))
+		}
+	}()
 	if len(batch) == 1 {
 		if err := w.store.WriteTrace(ctx, batch[0]); err != nil {
 			w.reportWriteFailure(WriteFailure{
@@ -344,6 +463,10 @@ func (w *Writer) flushBatch(ctx context.Context, batch []*Trace) {
 				FailedCount: 1,
 				Err:         err,
 			})
+		} else {
+			if m := w.loadMetrics(); m != nil && m.OnWriteSuccess != nil {
+				m.OnWriteSuccess(1)
+			}
 		}
 		return
 	}
@@ -366,6 +489,15 @@ func (w *Writer) flushBatch(ctx context.Context, batch []*Trace) {
 				FailedCount: failedWrites,
 				Err:         errors.Join(err, fallbackErr),
 			})
+		}
+		if succeeded := len(batch) - failedWrites; succeeded > 0 {
+			if m := w.loadMetrics(); m != nil && m.OnWriteSuccess != nil {
+				m.OnWriteSuccess(succeeded)
+			}
+		}
+	} else {
+		if m := w.loadMetrics(); m != nil && m.OnWriteSuccess != nil {
+			m.OnWriteSuccess(len(batch))
 		}
 	}
 }

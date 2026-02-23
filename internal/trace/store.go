@@ -21,6 +21,8 @@ type TraceStore interface {
 	GetCostSeries(ctx context.Context, filter AnalyticsFilter, groupBy, bucket string) ([]CostPoint, error)
 	GetModelStats(ctx context.Context, filter AnalyticsFilter) ([]ModelStats, error)
 	GetKeyStats(ctx context.Context, filter AnalyticsFilter) ([]KeyStats, error)
+	GetLatencyPercentiles(ctx context.Context, filter AnalyticsFilter, groupBy string) ([]LatencyStats, error)
+	GetErrorRateBreakdown(ctx context.Context, filter AnalyticsFilter, groupBy string) ([]ErrorRateStats, error)
 }
 
 type TraceFilter struct {
@@ -78,6 +80,8 @@ type CostPoint struct {
 	BucketStart  time.Time
 	Group        string
 	TotalCostUSD float64
+	RequestCount int64
+	AvgCostUSD   float64
 }
 
 type ModelStats struct {
@@ -95,4 +99,23 @@ type KeyStats struct {
 	TotalTokens  int64
 	TotalCostUSD float64
 	LastActiveAt time.Time
+}
+
+type LatencyStats struct {
+	Group        string
+	RequestCount int64
+	AvgMS        float64
+	MinMS        int64
+	MaxMS        int64
+	P50MS        float64
+	P95MS        float64
+	P99MS        float64
+}
+
+type ErrorRateStats struct {
+	Group         string
+	TotalRequests int64
+	ErrorCount4xx int64
+	ErrorCount5xx int64
+	ErrorRate     float64
 }

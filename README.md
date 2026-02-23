@@ -96,7 +96,7 @@ cd gateway && make build
 
 **Full Trace Capture** — Every request logged with model, tokens, latency, cost, and API key hash. Streaming is proxied in real time with minimal overhead.
 
-**HTTP Analytics API** — Query traces, usage, cost, model stats, and key activity via stable JSON endpoints.
+**HTTP Analytics API** — Query traces plus usage, cost, model, key, latency, and error-rate analytics via stable JSON endpoints.
 
 **Reproducible Calls** — Trace metadata always captures model, tokens, latency, cost, and route context. Enable body capture for full payload-level replay.
 
@@ -258,6 +258,9 @@ GET /api/analytics/usage?group_by=model       # Usage analytics
 GET /api/analytics/cost?group_by=provider     # Cost analytics
 GET /api/analytics/models                     # Model comparison
 GET /api/analytics/keys                       # Key analytics
+GET /api/analytics/latency?group_by=provider  # Latency distributions
+GET /api/analytics/errors?group_by=route      # Error-rate breakdowns
+GET /api/analytics/summary                    # Combined summary
 GET /api/health                               # Health check
 ```
 

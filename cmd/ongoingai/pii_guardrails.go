@@ -255,5 +255,5 @@ func logPIIGuardrailDeny(
 		attrs = append(attrs, "error", err)
 	}
 
-	logger.Warn("pii guardrail denied request", attrs...)
+	logger.WarnContext(req.Context(), "pii guardrail denied request", attrs...)
 }

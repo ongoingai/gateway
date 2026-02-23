@@ -57,6 +57,18 @@ type traceWriteFailureHandlerSetter interface {
 	SetWriteFailureHandler(handler trace.WriteFailureHandler)
 }
 
+type traceWriterMetricsSetter interface {
+	SetMetrics(m *trace.WriterMetrics)
+}
+
+type traceWriterQueueLenProvider interface {
+	QueueLen() int
+}
+
+type traceWriterQueueCapProvider interface {
+	QueueCap() int
+}
+
 var newTraceWriter = func(store trace.TraceStore, bufferSize int) asyncTraceWriter {
 	return trace.NewWriter(store, bufferSize)
 }
@@ -322,7 +334,9 @@ func runServe(args []string) int {
 		return 1
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	logger := slog.New(observability.NewTraceLogHandler(
+		slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}),
+	))
 	otelRuntime, otelErr := observability.Setup(context.Background(), cfg.Observability.OTel, version.String(), logger)
 	if otelErr != nil {
 		logger.Error("failed to initialize opentelemetry; continuing with instrumentation disabled", "error", otelErr)
@@ -372,9 +386,10 @@ func runServe(args []string) int {
 		fmt.Fprintf(os.Stderr, "unsupported storage.driver %q\n", cfg.Storage.Driver)
 		return 1
 	}
+	attachTraceWriterMetrics(traceWriter, otelRuntime)
 	attachTraceWriterFailureLogging(logger, traceWriter, func(failure trace.WriteFailure) {
 		if otelRuntime != nil {
-			otelRuntime.RecordTraceWriteFailure(failure.Operation, failure.FailedCount)
+			otelRuntime.RecordTraceWriteFailure(failure.Operation, failure.FailedCount, failure.ErrorClass, cfg.Storage.Driver)
 		}
 	})
 	defer shutdownTraceWriter(logger, traceWriter, traceWriterShutdownTimeout)
@@ -435,6 +450,9 @@ func runServe(args []string) int {
 		return 1
 	}
 	guardedProxyHandler := piiGuardrailMiddleware(cfg, logger, proxyHandler)
+	if otelRuntime != nil {
+		guardedProxyHandler = otelRuntime.WrapRouteSpan(guardedProxyHandler)
+	}
 
 	captureSink := func(exchange *proxy.CapturedExchange) {
 		if !shouldCaptureTrace(exchange.Path) {
@@ -442,19 +460,63 @@ func runServe(args []string) int {
 		}
 
 		traceRecord := buildTraceRecord(cfg, providerRegistry, exchange)
-		if queued := traceWriter.Enqueue(traceRecord); !queued {
-			logger.Warn(
+		enqueueCtx := exchange.Context
+		if enqueueCtx == nil {
+			enqueueCtx = context.Background()
+		}
+		if otelRuntime != nil {
+			otelRuntime.RecordProviderRequest(
+				enqueueCtx,
+				traceRecord.Provider,
+				traceRecord.Model,
+				exchange.GatewayOrgID,
+				exchange.GatewayWorkspaceID,
+				exchange.Path,
+				exchange.StatusCode,
+				exchange.DurationMS,
+			)
+			otelRuntime.RecordProxyRequest(
+				enqueueCtx,
+				traceRecord.Provider,
+				traceRecord.Model,
+				exchange.GatewayOrgID,
+				exchange.GatewayWorkspaceID,
+				exchange.Path,
+				exchange.StatusCode,
+				exchange.DurationMS,
+			)
+		}
+		_, endEnqueueSpan := otelRuntime.StartTraceEnqueueSpan(
+			enqueueCtx,
+			traceRecord.Provider,
+			traceRecord.Model,
+			exchange.GatewayOrgID,
+			exchange.GatewayWorkspaceID,
+			exchange.Path,
+		)
+		queued := traceWriter.Enqueue(traceRecord)
+		endEnqueueSpan(queued)
+
+		if !queued {
+			logger.WarnContext(enqueueCtx,
 				"trace queue is full; dropping trace",
 				"correlation_id", strings.TrimSpace(exchange.CorrelationID),
 				"path", exchange.Path,
 				"status", exchange.StatusCode,
 			)
 			if otelRuntime != nil {
-				otelRuntime.RecordTraceQueueDrop(exchange.Path, exchange.StatusCode)
+				otelRuntime.RecordTraceQueueDrop(
+					traceRecord.Provider,
+					traceRecord.Model,
+					exchange.GatewayOrgID,
+					exchange.GatewayWorkspaceID,
+					exchange.Path,
+					exchange.StatusCode,
+				)
 			}
 		}
 
-		logger.Debug(
+		logger.DebugContext(enqueueCtx,
 			"captured exchange",
 			"correlation_id", strings.TrimSpace(exchange.CorrelationID),
 			"method", exchange.Method,
@@ -507,10 +569,25 @@ func runServe(args []string) int {
 			return authorizerCache.Current(gatewayKeyCacheMaxStaleness)
 		}, authOptions, captureHandler)
 	}
+	if otelRuntime != nil {
+		protectedHandler = otelRuntime.WrapAuthMiddleware(protectedHandler)
+	}
 
 	serverHandler := protectedHandler
 	if otelRuntime != nil {
 		serverHandler = otelRuntime.WrapHTTPHandler(serverHandler)
+	}
+	if otelRuntime != nil && otelRuntime.PrometheusHandler() != nil {
+		promPath := cfg.Observability.OTel.PrometheusPath
+		promHandler := otelRuntime.PrometheusHandler()
+		inner := serverHandler
+		serverHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == promPath {
+				promHandler.ServeHTTP(w, r)
+				return
+			}
+			inner.ServeHTTP(w, r)
+		})
 	}
 	server := newGatewayServer(cfg, logger, serverHandler)
 
@@ -523,6 +600,8 @@ func runServe(args []string) int {
 		"providers", configuredProviderSummaries(cfg),
 		"config_path", *configPath,
 		"auth_enabled", cfg.Auth.Enabled,
+		"prometheus_enabled", cfg.Observability.OTel.PrometheusEnabled,
+		"prometheus_path", cfg.Observability.OTel.PrometheusPath,
 	)
 
 	ctx, stop := signalNotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -731,7 +810,7 @@ func newProxyAuthAuditRecorder(logger *slog.Logger) auth.AuditRecorder {
 		return nil
 	}
 	return func(req *http.Request, event auth.AuditEvent) {
-		logger.Warn(
+		logger.WarnContext(req.Context(),
 			"audit gateway auth deny",
 			"correlation_id", requestCorrelationID(req),
 			"audit_action", strings.TrimSpace(event.Action),
@@ -830,6 +909,32 @@ func shutdownTraceWriter(logger *slog.Logger, writer asyncTraceWriter, timeout t
 	}
 }
 
+func attachTraceWriterMetrics(writer asyncTraceWriter, otelRuntime *observability.Runtime) {
+	if writer == nil || otelRuntime == nil || !otelRuntime.Enabled() {
+		return
+	}
+
+	if qlp, ok := writer.(traceWriterQueueLenProvider); ok {
+		otelRuntime.RegisterTraceQueueDepthGauge(qlp.QueueLen)
+	}
+	if qcp, ok := writer.(traceWriterQueueCapProvider); ok {
+		otelRuntime.RegisterTraceQueueCapacityGauge(qcp.QueueCap)
+	}
+
+	ms, ok := writer.(traceWriterMetricsSetter)
+	if !ok {
+		return
+	}
+	ms.SetMetrics(&trace.WriterMetrics{
+		OnEnqueue:      otelRuntime.RecordTraceEnqueued,
+		OnFlush:        otelRuntime.RecordTraceFlush,
+		OnWriteStart:   otelRuntime.MakeWriteSpanHook(),
+		OnWriteSuccess: otelRuntime.RecordTraceWritten,
+		// OnDrop left nil: the captureSink already calls RecordTraceQueueDrop
+		// with richer route/status attributes.
+	})
+}
+
 func attachTraceWriterFailureLogging(logger *slog.Logger, writer asyncTraceWriter, onFailure func(trace.WriteFailure)) {
 	if logger == nil || writer == nil {
 		return
@@ -852,6 +957,7 @@ func attachTraceWriterFailureLogging(logger *slog.Logger, writer asyncTraceWrite
 			"operation", strings.TrimSpace(failure.Operation),
 			"batch_size", failure.BatchSize,
 			"failed_count", failure.FailedCount,
+			"error_class", failure.ErrorClass,
 			"error_kind", fmt.Sprintf("%T", failure.Err),
 		)
 	})

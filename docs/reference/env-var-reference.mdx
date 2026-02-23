@@ -44,6 +44,8 @@ If you set a variable to an empty string, gateway ignores it.
 | `OTEL_TRACES_SAMPLER_ARG` | float (`ParseFloat`) | `observability.otel.sampling_ratio` | `OTEL_TRACES_SAMPLER_ARG=0.25` |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | int (`Atoi`) | `observability.otel.export_timeout_ms` | `OTEL_EXPORTER_OTLP_TIMEOUT=3000` |
 | `OTEL_METRIC_EXPORT_INTERVAL` | int (`Atoi`) | `observability.otel.metric_export_interval_ms` | `OTEL_METRIC_EXPORT_INTERVAL=10000` |
+| `ONGOINGAI_PROMETHEUS_ENABLED` | bool (`ParseBool`) | `observability.otel.prometheus_enabled` | `ONGOINGAI_PROMETHEUS_ENABLED=true` |
+| `ONGOINGAI_PROMETHEUS_PATH` | string | `observability.otel.prometheus_path` | `ONGOINGAI_PROMETHEUS_PATH=/metrics` |
 | `ONGOINGAI_PII_MODE` | string | `pii.mode` | `ONGOINGAI_PII_MODE=redact_storage` |
 | `ONGOINGAI_PII_POLICY_ID` | string | `pii.policy_id` | `ONGOINGAI_PII_POLICY_ID=default/v1` |
 | `ONGOINGAI_PII_HASH_SALT` | string | `pii.replacement.hash_salt` | `ONGOINGAI_PII_HASH_SALT=workspace-salt` |
@@ -54,6 +56,9 @@ OpenTelemetry auto-enable behavior:
 - If any OTEL exporter/service/sampler variable above is set, gateway enables
   OTEL by default.
 - `OTEL_SDK_DISABLED=true` always disables gateway OTEL instrumentation.
+- `OTEL_METRICS_EXPORTER=prometheus` enables Prometheus scrape mode and
+  disables OTLP push metrics. This is equivalent to setting
+  `prometheus_enabled: true` and `metrics_enabled: false`.
 
 ## Values without env overrides
 

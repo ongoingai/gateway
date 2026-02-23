@@ -495,7 +495,9 @@ func (s *PostgresStore) GetCostSeries(ctx context.Context, filter AnalyticsFilte
 SELECT
 	` + bucketExpr + ` AS bucket_start,
 	` + groupExpr + ` AS group_value,
-	COALESCE(SUM(estimated_cost_usd), 0)
+	COALESCE(SUM(estimated_cost_usd), 0),
+	COUNT(*),
+	COALESCE(AVG(estimated_cost_usd), 0)
 FROM traces
 WHERE ` + whereSQL + `
 GROUP BY 1, 2
@@ -514,7 +516,7 @@ ORDER BY 1 ASC, 2 ASC
 			groupValue  sql.NullString
 			point       CostPoint
 		)
-		if err := rows.Scan(&bucketStart, &groupValue, &point.TotalCostUSD); err != nil {
+		if err := rows.Scan(&bucketStart, &groupValue, &point.TotalCostUSD, &point.RequestCount, &point.AvgCostUSD); err != nil {
 			return nil, fmt.Errorf("scan cost series row: %w", err)
 		}
 		point.BucketStart = bucketStart.UTC()
@@ -603,6 +605,103 @@ ORDER BY request_count DESC, api_key_hash ASC
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate key stats rows: %w", err)
+	}
+
+	return stats, nil
+}
+
+func (s *PostgresStore) GetLatencyPercentiles(ctx context.Context, filter AnalyticsFilter, groupBy string) ([]LatencyStats, error) {
+	groupExpr, err := postgresAnalyticsGroupExpression(groupBy)
+	if err != nil {
+		return nil, err
+	}
+
+	whereSQL, args := buildPostgresAnalyticsWhere(filter)
+	query := `
+SELECT ` + groupExpr + ` AS group_value,
+	COUNT(*),
+	COALESCE(AVG(latency_ms), 0),
+	COALESCE(MIN(latency_ms), 0),
+	COALESCE(MAX(latency_ms), 0),
+	COALESCE(percentile_cont(0.50) WITHIN GROUP (ORDER BY latency_ms), 0),
+	COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY latency_ms), 0),
+	COALESCE(percentile_cont(0.99) WITHIN GROUP (ORDER BY latency_ms), 0)
+FROM traces
+WHERE ` + whereSQL + `
+GROUP BY group_value
+ORDER BY 2 DESC, 1 ASC
+`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query latency percentiles: %w", err)
+	}
+	defer rows.Close()
+
+	stats := make([]LatencyStats, 0)
+	for rows.Next() {
+		var (
+			groupValue sql.NullString
+			item       LatencyStats
+		)
+		if err := rows.Scan(&groupValue, &item.RequestCount, &item.AvgMS, &item.MinMS, &item.MaxMS, &item.P50MS, &item.P95MS, &item.P99MS); err != nil {
+			return nil, fmt.Errorf("scan latency percentile row: %w", err)
+		}
+		if groupValue.Valid {
+			item.Group = groupValue.String
+		}
+		stats = append(stats, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate latency percentile rows: %w", err)
+	}
+
+	return stats, nil
+}
+
+func (s *PostgresStore) GetErrorRateBreakdown(ctx context.Context, filter AnalyticsFilter, groupBy string) ([]ErrorRateStats, error) {
+	groupExpr, err := postgresAnalyticsGroupExpression(groupBy)
+	if err != nil {
+		return nil, err
+	}
+
+	whereSQL, args := buildPostgresAnalyticsWhere(filter)
+	query := `
+SELECT ` + groupExpr + ` AS group_value,
+	COUNT(*) AS total_requests,
+	SUM(CASE WHEN response_status >= 400 AND response_status < 500 THEN 1 ELSE 0 END),
+	SUM(CASE WHEN response_status >= 500 THEN 1 ELSE 0 END)
+FROM traces
+WHERE ` + whereSQL + `
+GROUP BY group_value
+ORDER BY total_requests DESC, group_value ASC
+`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query error rate breakdown: %w", err)
+	}
+	defer rows.Close()
+
+	stats := make([]ErrorRateStats, 0)
+	for rows.Next() {
+		var (
+			groupValue sql.NullString
+			item       ErrorRateStats
+		)
+		if err := rows.Scan(&groupValue, &item.TotalRequests, &item.ErrorCount4xx, &item.ErrorCount5xx); err != nil {
+			return nil, fmt.Errorf("scan error rate row: %w", err)
+		}
+		if groupValue.Valid {
+			item.Group = groupValue.String
+		}
+		if item.TotalRequests > 0 {
+			item.ErrorRate = float64(item.ErrorCount4xx+item.ErrorCount5xx) / float64(item.TotalRequests)
+		}
+		stats = append(stats, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate error rate rows: %w", err)
 	}
 
 	return stats, nil
@@ -700,6 +799,23 @@ func postgresUsageGroupExpression(groupBy string) (string, error) {
 		return "provider", nil
 	case "model":
 		return "model", nil
+	default:
+		return "", fmt.Errorf("invalid group_by: %q", groupBy)
+	}
+}
+
+func postgresAnalyticsGroupExpression(groupBy string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(groupBy)) {
+	case "", "none":
+		return "''", nil
+	case "provider":
+		return "provider", nil
+	case "model":
+		return "model", nil
+	case "route":
+		return "request_path", nil
+	case "key":
+		return "gateway_key_id", nil
 	default:
 		return "", fmt.Errorf("invalid group_by: %q", groupBy)
 	}

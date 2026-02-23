@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ongoingai/gateway/internal/config"
+	"github.com/ongoingai/gateway/internal/observability"
 	"github.com/ongoingai/gateway/internal/pathutil"
 	"github.com/ongoingai/gateway/internal/providers"
 	"github.com/ongoingai/gateway/internal/proxy"
@@ -24,7 +25,9 @@ var (
 	emailPIIPattern = regexp.MustCompile(`(?i)\b[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}\b`)
 	phonePIIPattern = regexp.MustCompile(`\b(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b`)
 	ssnPIIPattern   = regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)
-	tokenPIIPattern = regexp.MustCompile(`(?i)\b(?:sk|pk|rk|xox[baprs]|gh[pousr]|pat)_[a-z0-9_-]{8,}\b|eyj[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}`)
+	// Token-like PII pattern composed from shared credential regexes in
+	// internal/observability/sanitize.go to prevent pattern drift.
+	tokenPIIPattern = regexp.MustCompile(observability.TokenPrefixPattern.String() + `|` + observability.JWTPattern.String())
 )
 
 const (

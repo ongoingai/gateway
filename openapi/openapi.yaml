@@ -204,6 +204,11 @@ paths:
       summary: Model statistics
       security:
         - GatewayKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Provider'
+        - $ref: '#/components/parameters/Model'
       responses:
         '200':
           description: Model stats
@@ -211,11 +216,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ModelsResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
   /api/analytics/keys:
     get:
       summary: API key statistics
       security:
         - GatewayKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Provider'
+        - $ref: '#/components/parameters/Model'
       responses:
         '200':
           description: Key stats
@@ -223,11 +235,58 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/KeysResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+  /api/analytics/latency:
+    get:
+      summary: Latency percentile breakdown
+      security:
+        - GatewayKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Provider'
+        - $ref: '#/components/parameters/Model'
+        - $ref: '#/components/parameters/AnalyticsGroupBy'
+      responses:
+        '200':
+          description: Latency distribution stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LatencyResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
+  /api/analytics/errors:
+    get:
+      summary: Error-rate breakdown
+      security:
+        - GatewayKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Provider'
+        - $ref: '#/components/parameters/Model'
+        - $ref: '#/components/parameters/AnalyticsGroupBy'
+      responses:
+        '200':
+          description: Error-rate breakdown stats
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorsResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
   /api/analytics/summary:
     get:
       summary: Analytics summary
       security:
         - GatewayKeyAuth: []
+      parameters:
+        - $ref: '#/components/parameters/From'
+        - $ref: '#/components/parameters/To'
+        - $ref: '#/components/parameters/Provider'
+        - $ref: '#/components/parameters/Model'
       responses:
         '200':
           description: Analytics summary
@@ -235,6 +294,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SummaryResponse'
+        '400':
+          $ref: '#/components/responses/ErrorResponse'
   /api/gateway-keys:
     get:
       summary: List gateway keys
@@ -373,6 +434,12 @@ components:
       schema:
         type: string
         enum: [provider, model]
+    AnalyticsGroupBy:
+      in: query
+      name: group_by
+      schema:
+        type: string
+        enum: [provider, model, route, key]
     Bucket:
       in: query
       name: bucket
@@ -467,6 +534,15 @@ components:
           format: date-time
         last_write_drop_operation:
           type: string
+        write_failures_by_class:
+          type: object
+          description: Per-class write failure counts (only non-zero classes included).
+          additionalProperties:
+            type: integer
+            format: int64
+        store_driver:
+          type: string
+          description: Storage driver backing the trace pipeline (e.g. sqlite, postgres).
       required:
         - queue_capacity
         - queue_depth
@@ -725,7 +801,13 @@ components:
         total_cost_usd:
           type: number
           format: double
-      required: [bucket_start, total_cost_usd]
+        request_count:
+          type: integer
+          format: int64
+        avg_cost_usd:
+          type: number
+          format: double
+      required: [bucket_start, total_cost_usd, request_count, avg_cost_usd]
     CostSeriesResponse:
       type: object
       properties:
@@ -738,6 +820,71 @@ components:
           items:
             $ref: '#/components/schemas/CostSeriesPoint'
       required: [bucket, items]
+    LatencyStatsPoint:
+      type: object
+      properties:
+        group:
+          type: string
+        request_count:
+          type: integer
+          format: int64
+        avg_ms:
+          type: number
+          format: double
+        min_ms:
+          type: integer
+          format: int64
+        max_ms:
+          type: integer
+          format: int64
+        p50_ms:
+          type: number
+          format: double
+        p95_ms:
+          type: number
+          format: double
+        p99_ms:
+          type: number
+          format: double
+      required: [request_count, avg_ms, min_ms, max_ms, p50_ms, p95_ms, p99_ms]
+    LatencyResponse:
+      type: object
+      properties:
+        group_by:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/LatencyStatsPoint'
+      required: [items]
+    ErrorRatePoint:
+      type: object
+      properties:
+        group:
+          type: string
+        total_requests:
+          type: integer
+          format: int64
+        error_count_4xx:
+          type: integer
+          format: int64
+        error_count_5xx:
+          type: integer
+          format: int64
+        error_rate:
+          type: number
+          format: double
+      required: [total_requests, error_count_4xx, error_count_5xx, error_rate]
+    ErrorsResponse:
+      type: object
+      properties:
+        group_by:
+          type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ErrorRatePoint'
+      required: [items]
     ModelStats:
       type: object
       properties:
