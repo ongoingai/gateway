@@ -30,6 +30,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/exemplar"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -253,7 +254,9 @@ func Setup(ctx context.Context, cfg config.OTelConfig, serviceVersion string, lo
 	}
 
 	if cfg.MetricsEnabled || cfg.PrometheusEnabled {
-		meterProvider := sdkmetric.NewMeterProvider(meterOpts...)
+		meterProvider := sdkmetric.NewMeterProvider(
+			append(meterOpts, sdkmetric.WithExemplarFilter(exemplar.AlwaysOnFilter))...,
+		)
 		otel.SetMeterProvider(meterProvider)
 		runtime.shutdownFns = append(runtime.shutdownFns, meterProvider.Shutdown)
 
@@ -666,8 +669,10 @@ func (r *Runtime) RecordTraceFlush(batchSize int, duration time.Duration) {
 }
 
 // RecordProviderRequest records a single upstream provider request with its
-// status code and latency.
+// status code and latency. The context carries the active span for exemplar
+// attachment on histogram data points (metrics→traces correlation).
 func (r *Runtime) RecordProviderRequest(
+	ctx context.Context,
 	provider string,
 	model string,
 	orgID string,
@@ -679,7 +684,9 @@ func (r *Runtime) RecordProviderRequest(
 	if !r.Enabled() {
 		return
 	}
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	scope := newTelemetryScope(provider, model, orgID, workspaceID, path)
 	if r.providerRequestCounter != nil {
 		attrs := append(scope.metricAttributes(), attribute.Int("status_code", statusCode))
@@ -745,11 +752,15 @@ func (r *Runtime) RegisterTraceQueueCapacityGauge(capacityFn func() int) {
 }
 
 // RecordProxyRequest records a proxy request with tenant-scoped attributes.
-func (r *Runtime) RecordProxyRequest(provider, model, orgID, workspaceID, path string, statusCode int, durationMS int64) {
+// The context carries the active span for exemplar attachment on histogram
+// data points (metrics→traces correlation).
+func (r *Runtime) RecordProxyRequest(ctx context.Context, provider, model, orgID, workspaceID, path string, statusCode int, durationMS int64) {
 	if !r.Enabled() {
 		return
 	}
-	ctx := context.Background()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	scope := newTelemetryScope(provider, model, orgID, workspaceID, path)
 	if r.proxyRequestCounter != nil {
 		attrs := append(scope.metricAttributes(), attribute.Int("status_code", statusCode))

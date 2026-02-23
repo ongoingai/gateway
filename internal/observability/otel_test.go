@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/exemplar"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
@@ -477,7 +479,7 @@ func TestRecordProviderRequestIncludesMetricAttributes(t *testing.T) {
 		providerRequestDurationHistogram: histogram,
 	}
 
-	runtime.RecordProviderRequest("openai", "gpt-4o", "org-provider", "ws-provider", "/openai/v1/chat/completions", 200, 1250)
+	runtime.RecordProviderRequest(context.Background(), "openai", "gpt-4o", "org-provider", "ws-provider", "/openai/v1/chat/completions", 200, 1250)
 
 	var metrics metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &metrics); err != nil {
@@ -596,6 +598,7 @@ func TestRecordProviderRequestScrubsCredentialLikeModelLabel(t *testing.T) {
 	}
 
 	runtime.RecordProviderRequest(
+		context.Background(),
 		"openai",
 		"sk_live_abc123def456ghi789",
 		"org-provider",
@@ -827,8 +830,8 @@ func TestRuntimeGuardsDoNotPanic(t *testing.T) {
 			tt.runtime.RecordTraceEnqueued()
 			tt.runtime.RecordTraceWritten(3)
 			tt.runtime.RecordTraceFlush(10, 50*time.Millisecond)
-			tt.runtime.RecordProviderRequest("openai", "gpt-4o", "org-1", "ws-1", "/openai/v1/chat", 200, 1000)
-			tt.runtime.RecordProxyRequest("openai", "gpt-4o", "org-1", "ws-1", "/openai/v1/chat", 200, 1000)
+			tt.runtime.RecordProviderRequest(context.Background(), "openai", "gpt-4o", "org-1", "ws-1", "/openai/v1/chat", 200, 1000)
+			tt.runtime.RecordProxyRequest(context.Background(), "openai", "gpt-4o", "org-1", "ws-1", "/openai/v1/chat", 200, 1000)
 			tt.runtime.RegisterTraceQueueDepthGauge(func() int { return 0 })
 			tt.runtime.RegisterTraceQueueCapacityGauge(func() int { return 256 })
 
@@ -1476,7 +1479,7 @@ func TestRecordProxyRequestIncludesMetricAttributes(t *testing.T) {
 		proxyRequestDurationHistogram: histogram,
 	}
 
-	runtime.RecordProxyRequest("openai", "gpt-4o", "org-test", "ws-test", "/openai/v1/chat/completions", 200, 850)
+	runtime.RecordProxyRequest(context.Background(), "openai", "gpt-4o", "org-test", "ws-test", "/openai/v1/chat/completions", 200, 850)
 
 	var metrics metricdata.ResourceMetrics
 	if err := reader.Collect(context.Background(), &metrics); err != nil {
@@ -1670,7 +1673,7 @@ func TestSpanWrappersNoopWhenDisabled(t *testing.T) {
 
 			// New methods no-op without panic.
 			tt.runtime.RecordTraceWritten(5)
-			tt.runtime.RecordProxyRequest("openai", "gpt-4o", "org-1", "ws-1", "/openai/v1/chat", 200, 500)
+			tt.runtime.RecordProxyRequest(context.Background(), "openai", "gpt-4o", "org-1", "ws-1", "/openai/v1/chat", 200, 500)
 			tt.runtime.RegisterTraceQueueCapacityGauge(func() int { return 128 })
 
 			if tt.runtime.PrometheusHandler() != nil {
@@ -2045,6 +2048,86 @@ func TestCustomHistogramBucketsFlush(t *testing.T) {
 		}
 	}
 	t.Fatal("missing ongoingai.trace.flush_duration_seconds metric")
+}
+
+func TestHistogramExemplarsAttachTraceID(t *testing.T) {
+	t.Parallel()
+
+	reader := sdkmetric.NewManualReader()
+	meterProvider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(reader),
+		sdkmetric.WithExemplarFilter(exemplar.AlwaysOnFilter),
+	)
+	t.Cleanup(func() {
+		if err := meterProvider.Shutdown(context.Background()); err != nil {
+			t.Fatalf("meterProvider.Shutdown() error: %v", err)
+		}
+	})
+
+	meter := meterProvider.Meter("test")
+	histogram, err := meter.Float64Histogram("test.proxy.request_duration_seconds")
+	if err != nil {
+		t.Fatalf("Float64Histogram() error: %v", err)
+	}
+
+	runtime := &Runtime{
+		enabled:                       true,
+		proxyRequestDurationHistogram: histogram,
+	}
+
+	// Create a real span so the context carries a valid trace ID.
+	tp := sdktrace.NewTracerProvider()
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+	ctx, span := tp.Tracer("test").Start(context.Background(), "test.request")
+	wantTraceID := span.SpanContext().TraceID()
+	if !wantTraceID.IsValid() {
+		t.Fatal("test span has invalid trace ID")
+	}
+	wantTraceIDBytes := wantTraceID[:]
+
+	runtime.RecordProxyRequest(ctx, "openai", "gpt-4o", "org-ex", "ws-ex", "/openai/v1/chat/completions", 200, 750)
+	span.End()
+
+	var metrics metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &metrics); err != nil {
+		t.Fatalf("Collect() error: %v", err)
+	}
+
+	found := false
+	for _, scope := range metrics.ScopeMetrics {
+		for _, m := range scope.Metrics {
+			if m.Name != "test.proxy.request_duration_seconds" {
+				continue
+			}
+			hist, ok := m.Data.(metricdata.Histogram[float64])
+			if !ok {
+				t.Fatalf("data type=%T, want metricdata.Histogram[float64]", m.Data)
+			}
+			if len(hist.DataPoints) != 1 {
+				t.Fatalf("datapoints=%d, want 1", len(hist.DataPoints))
+			}
+			dp := hist.DataPoints[0]
+			if len(dp.Exemplars) == 0 {
+				t.Fatal("histogram data point has no exemplars; expected at least one with trace ID")
+			}
+			exemplarFound := false
+			for _, ex := range dp.Exemplars {
+				if len(ex.TraceID) > 0 && !bytes.Equal(ex.TraceID, make([]byte, len(ex.TraceID))) {
+					if !bytes.Equal(ex.TraceID, wantTraceIDBytes) {
+						t.Fatalf("exemplar trace_id=%x, want %x", ex.TraceID, wantTraceIDBytes)
+					}
+					exemplarFound = true
+				}
+			}
+			if !exemplarFound {
+				t.Fatal("no exemplar with non-zero trace ID found")
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("missing test.proxy.request_duration_seconds metric")
+	}
 }
 
 func spanAttrMap(span sdktrace.ReadOnlySpan) map[string]string {
